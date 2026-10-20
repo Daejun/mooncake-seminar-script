@@ -31,7 +31,7 @@ a { color: var(--accent); }
 </head><body>
 <header>
   <button id="prev" aria-label="이전 slide">◀</button>
-  <input id="no" type="number" inputmode="numeric" min="1" max="69" aria-label="slide 번호"><span class="of">/ 69</span>
+  <input id="no" type="number" inputmode="numeric" min="1" max="70" aria-label="slide 번호"><span class="of">/ 70</span>
   <button id="next" aria-label="다음 slide">▶</button>
   <span class="sp"></span>
   <a href="#appendix">부록</a><a href="#faq">질문</a>
@@ -50,46 +50,49 @@ a { color: var(--accent); }
 <h2 id="n1">1. s01 Mooncake의 구조와 동작 (0.5분, 끝나면 누적
 0.5분)</h2>
 <p><strong>[0]</strong> LLM 추론에서 KV cache를 옮기고 나누는 시스템,
-Mooncake입니다. 오늘 내용은 upstream code를 읽고 확인한 것입니다. 몇
-곳은 직접 돌려 확인했습니다. RDMA 장치가 없는 한 host에서 TCP로
-돌렸습니다. 성능은 재지 않았습니다.</p>
-<h2 id="n2">2. s02 KV cache와 두 단계 (2분, 끝나면 누적 2.5분)</h2>
+Mooncake입니다. code를 읽어 확인했고, 몇 곳은 RDMA 장치 없는 host에서
+TCP로 돌려 봤습니다. 확인한 방법은 오른쪽 아래 표지에 있습니다. RDMA는
+code로만 봤고 성능은 재지 않았습니다.</p>
+<h2 id="n2">2. s02 KV cache와 두 단계 (2.5분, 끝나면 누적 3분)</h2>
 <p><strong>[0]</strong> 요청 하나가 GPU에서 어떻게 처리되는지부터
 봅니다. 왼쪽 파란 칸이 prompt의 token입니다. token은 model이 글을 읽는
 조각입니다.</p>
 <p><strong>[1]</strong> 첫 단계는 prefill입니다. prompt 전부를 한 번에
-계산합니다. 그 결과로 token마다, layer마다 Key와 Value가 생깁니다. KV는
-key-value store가 아니라 attention의 Key와 Value입니다. 이것이 KV
-cache입니다. LLaMA3-70B면 token 하나에 320 KiB이고, 128k token이면 40
-GiB입니다.</p>
+계산합니다. model은 layer라는 단계를 여러 번 거치고, token마다,
+layer마다 Key와 Value라는 중간 결과를 남깁니다. KV는 key-value store가
+아니라 attention의 Key와 Value입니다. 이것이 KV cache입니다. 오늘은
+token마다 생기는 큰 byte 덩어리로 보면 됩니다. LLaMA3-70B는 80 layer마다
+Key와 Value가 숫자 1024개씩, 하나에 2 byte라 token당 320 KiB입니다. 128k
+token이면 40 GiB입니다.</p>
 <p><strong>[2]</strong> 다음은 decode입니다. 주황 칸처럼 token을 하나씩
 만듭니다. 다음 token은 앞 token이 정해져야 계산할 수 있기 때문입니다.
 하나를 만들 때마다 쌓인 KV를 전부 읽습니다. 그래서 KV cache는 계속
 커지고 계속 읽힙니다.</p>
-<p><strong>[3]</strong> 이제 다음 요청이 옵니다. 앞부분이 같습니다. 같은
-system prompt나 같은 문서를 쓰는 경우죠. 이 앞부분의 KV는 이미 한 번
-계산했습니다. token의 KV는 그 token과 앞 token에만 달려 있어서, 앞부분이
-같으면 그대로 다시 쓸 수 있습니다. 중간만 같아서는 안 됩니다. 다시
-계산하지 않으려면 KV를 어디에 두면 될까요?</p>
-<h2 id="n3">3. s03 PD 분리와 KV pool (2분, 끝나면 누적 4.5분)</h2>
-<p><strong>[0]</strong> Mooncake의 답은 둘입니다. 화면에 GPU 서버가 넷
-있습니다.</p>
+<p><strong>[3]</strong> 다음 요청은 앞부분이 같습니다. token의 KV는 그
+token과 앞 token에만 달려 있어서, 앞부분이 같으면 그대로 다시 쓸 수
+있습니다. GPU에 두면 될까요? 논문의 A800은 한 장이 80 GB인데, 70B
+model은 weight만 약 140 GB라 여러 장에 나눠 올립니다. decode는 효율을
+높이려고 요청을 묶는데, 묶을 수 있는 수가 GPU에 담을 KV 크기에 막힌다고
+논문은 씁니다. 그러면 KV를 어디에 둘까요?</p>
+<h2 id="n3">3. s03 PD 분리와 KV pool (2분, 끝나면 누적 5분)</h2>
+<p><strong>[0]</strong> Mooncake의 답은 둘입니다. GPU 서버 넷으로
+봅니다.</p>
 <p><strong>[1]</strong> 첫째, prefill과 decode를 다른 GPU 묶음으로
-나눕니다. 이것을 PD 분리라고 부릅니다. prefill은 계산이, decode는 메모리
-읽기가 병목이라 섞으면 서로 방해합니다. 그러면 prefill이 만든 KV를
-decode 쪽으로 옮겨야 합니다. 그 일을 하는 것이 Transfer
-Engine입니다.</p>
-<p><strong>[2]</strong> 둘째, GPU 서버마다 CPU의 DRAM과 SSD가 있습니다.
-이것을 아래 띠처럼 하나로 묶어 KV pool을 만듭니다. 한 번 계산한 KV를
-여기에 두고, 다른 요청과 다른 추론 엔진이 다시 씁니다. 추론 엔진은 vLLM,
-SGLang 같은 serving 프로그램입니다. 이것이 Mooncake Store입니다. 꺼내
-오는 편이 다시 계산하는 것보다 빠를까요? 논문은 LLaMA3-70B, A800 8장,
+나눕니다. 이것을 PD 분리라고 부릅니다. prefill은 계산이 많고, decode는
+메모리 읽기에 묶입니다. 섞으면 prefill의 계산 효율과 decode의 token
+간격을 함께 지키기 어렵습니다. 그러면 prefill이 만든 KV를 decode 쪽으로
+옮겨야 합니다. 그 일이 Transfer Engine입니다.</p>
+<p><strong>[2]</strong> 둘째, 서버마다 있는 CPU의 DRAM과 SSD를 아래
+띠처럼 하나로 묶어 KV pool을 만듭니다. 한 번 계산한 KV를 여기에 두고,
+다른 요청과 다른 엔진 instance가 다시 씁니다. 엔진은 vLLM, SGLang 같은
+추론 serving 프로그램입니다. 이것이 Mooncake Store입니다. 꺼내 오는 편이
+다시 계산하는 것보다 빠를까요? 논문은 LLaMA3-70B, A800 8장 서버 한 대,
 앞부분 8192 token이면 KV를 6 GB/s 이상으로 가져올 때 첫 token이 더 빨리
 나온다고 계산합니다.</p>
 <p><strong>[3]</strong> 정리하면 아래에 옮기는 Transfer Engine, 그 위에
 두는 Store가 있습니다. 옆의 EP와 PG는 오늘 범위 밖이고 7막에서 한 줄씩만
-봅니다. 설계는 FAST 2025 논문에 있습니다.</p>
-<h2 id="n4">4. s04 먼저 답 (1.5분, 끝나면 누적 6분)</h2>
+봅니다.</p>
+<h2 id="n4">4. s04 먼저 답 (1.5분, 끝나면 누적 6.5분)</h2>
 <p><strong>[0]</strong> 답을 먼저 드리겠습니다. master는 자리를 정하는
 서버, client는 메모리를 내놓고 옮기는 쪽입니다. 순서는 화면 위 띠와
 같습니다. 2막 TE, 3막 Store, 4막 put과 get, 5막 수명, 6막 SSD, 7막 엔진
@@ -103,80 +106,94 @@ cache입니다. 지워지고, 같은 key로 다시 넣으면 무시되고, maste
 <p><strong>[3]</strong> 셋째, SSD입니다. SSD에 쓰는 일은 master가
 시킵니다. 읽기는 늘 그 SSD의 client를 거쳐서, 그 client가 죽으면 SSD
 사본도 못 읽습니다. 그래서 잃어도 다시 계산할 수 있는 KV에 맞습니다.</p>
-<h2 id="n5">5. s05 프로세스와 port (1분, 끝나면 누적 7분)</h2>
-<p><strong>[0]</strong> 띄우는 프로세스부터 봅니다. 이 배치는 오늘 계속
-나옵니다. 가운데 위가 master, 그 아래가 TE metadata, 왼쪽과 오른쪽이
-노드입니다.</p>
+<h2 id="n5">5. s05 프로세스와 port (1분, 끝나면 누적 7.5분)</h2>
+<p><strong>[0]</strong> 띄우는 프로세스입니다. 이 배치는 오늘 계속
+나옵니다. 가운데 위가 master, 아래가 TE metadata, 양옆이 노드입니다.</p>
 <p><strong>[1]</strong> 가운데 둘이 control plane입니다. master는 50051
-port의 RPC를 받습니다. TE metadata는 HTTP, etcd, redis 가운데
-하나입니다. 서버 없이 연결할 때 교환하는 방법도 있습니다.</p>
-<p><strong>[2]</strong> 노드 쪽이 바이트를 갖는 client입니다. 엔진
-안에서 돌 수도 있고, 따로 데몬으로 띄울 수도 있습니다. 노드 B의 buffer는
-6막에서 씁니다. Conductor는 선택입니다.</p>
-<h2 id="n6">6. n1 Transfer Engine (0.25분, 끝나면 누적 7.25분)</h2>
+port의 RPC를 받습니다. TE metadata를 두는 곳은 2막에서 봅니다.</p>
+<p><strong>[2]</strong> 노드 쪽은 바이트를 갖는 client입니다. 엔진
+안에서 돌거나 따로 데몬으로 띄웁니다. 노드 B의 SSD 읽기 buffer는 6막에서
+씁니다. Conductor는 어느 instance에 어떤 KV가 있는지 모으며, 없어도
+됩니다.</p>
+<h2 id="n6">6. n1 Transfer Engine (0.25분, 끝나면 누적 7.75분)</h2>
 <p><strong>[0]</strong> 먼저 바이트를 옮기는 Transfer Engine입니다. 노드
 A가 노드 B의 메모리에 쓰는데, 노드 B의 CPU는 모릅니다.</p>
-<h2 id="n7">7. s55 RDMA 한 장 (1.5분, 끝나면 누적 8.75분)</h2>
+<h2 id="n7">7. s55 RDMA 한 장 (2분, 끝나면 누적 9.75분)</h2>
 <p><strong>[0]</strong> 상대 CPU를 깨우지 않고 어떻게 옮길까요? RDMA를
 한 장으로 봅니다. A의 NIC가 B의 메모리에 바로 쓰는 network입니다.</p>
-<p><strong>[1]</strong> 먼저 등록입니다. B가 쓰게 할 메모리 영역을 NIC에
-등록합니다. OS가 그 page를 고정하고 NIC에 주소표를 넘깁니다. 그러면
-key가 나옵니다. 이 영역을 MR, 상대가 쓰는 key를 rkey라고 부릅니다.</p>
-<p><strong>[2]</strong> 다음은 연결입니다. 두 NIC 사이에 QP라는 연결을
-만듭니다. 처음 한 번만 TCP로 번호를 주고받습니다.</p>
+<p><strong>[1]</strong> 먼저 등록입니다. B가 남에게 쓰게 할 메모리
+영역을 NIC에 등록합니다. OS는 DMA 동안 page가 옮겨지지 않게 고정하고,
+가상 주소를 물리 주소로 바꾸는 표를 NIC에 넘깁니다. kernel로 치면
+pin_user_pages(FOLL_LONGTERM)와 DMA map입니다. 그러면 key가 나옵니다. 이
+영역을 MR, 상대가 쓰는 key를 rkey라고 부릅니다.</p>
+<p><strong>[2]</strong> 다음은 연결입니다. 두 NIC 사이에 QP를 만듭니다.
+queue pair, 곧 보낼 일과 받을 일의 queue 한 쌍이고, socket 하나쯤으로
+보면 됩니다. 처음 한 번만 TCP로 번호를 주고받습니다.</p>
 <p><strong>[3]</strong> 이제 A의 NIC가 B의 주소와 rkey로 직접 씁니다.
 B의 CPU는 모릅니다. 이것을 one-sided라고 합니다. 끝나면 A의 completion
-queue에 결과가 하나 쌓입니다. 열쇠를 받아 상대 창고에 직접 넣는
-셈입니다. B가 끝났음을 아는 방법은 4막에서 봅니다.</p>
-<h2 id="n8">8. s06 TE에 일 시키기 (1.5분, 끝나면 누적 10.25분)</h2>
+queue에 결과가 하나 쌓이고, A의 TE thread가 그것을 들여다봅니다. 열쇠를
+받아 상대 창고에 직접 넣는 셈입니다. B가 끝났음을 아는 방법은 4막에서
+봅니다.</p>
+<h2 id="n8">8. s06 TE에 일 시키기 (1.5분, 끝나면 누적 11.25분)</h2>
 <p><strong>[0]</strong> TE는 등록, 연결, NIC 선택, 재시도를 대신 해 주는
 library입니다. 일을 시키는 순서는 넷입니다.</p>
 <p><strong>[1]</strong> 먼저 init입니다. metadata를 둘 곳에 연결하고, 쓸
-transport를 설치합니다.</p>
+transport를 설치합니다. 설치는 RDMA나 TCP 담당 객체를 만들어 두는
+일입니다.</p>
 <p><strong>[2]</strong> 다음은 내 메모리를 NIC에 등록합니다. 이렇게
 등록해 내놓은 메모리 묶음을 segment라고 부릅니다. 상대의 segment를
 연다는 것은 그 설명을 받아 두는 것입니다.</p>
 <p><strong>[3]</strong> 이제 전송 요청입니다. 다섯 칸입니다. 읽기인지
 쓰기인지, 내 주소, 상대 segment, 상대 쪽 위치, 길이입니다. 파란 칸을
-보세요. 이름은 offset이지만 RDMA에서는 상대 프로세스의 가상 주소입니다.
-끝났는지는 polling으로 봅니다. Python에서는 아래 이름들입니다.</p>
-<h2 id="n9">9. s07 memory 등록 (1.5분, 끝나면 누적 11.75분)</h2>
+보세요. 이름은 offset이지만 상대 프로세스의 가상 주소입니다. TCP에서도
+같습니다. 그 주소는 받아 둔 설명에서, Store에서는 master에게서 받습니다.
+끝났는지는 상태를 물어 보고, Store는 쉬지 않고 돌며 묻습니다.
+Python에서는 아래 이름들입니다.</p>
+<h2 id="n9">9. s07 memory 등록 (1.5분, 끝나면 누적 12.75분)</h2>
 <p><strong>[0]</strong> 등록이 하는 일을 봅니다. 왼쪽이 등록할 메모리,
 오른쪽이 NIC 넷입니다.</p>
 <p><strong>[1]</strong> NIC마다 따로 MR을 만듭니다. 그래서 key도 NIC마다
 다릅니다. 상대는 어느 NIC로 들어오든 그 NIC의 key를 씁니다.</p>
 <p><strong>[2]</strong> 위치도 알아냅니다. 첫 page를 보고 어느 NUMA의
-CPU 메모리인지, 어느 GPU인지 정합니다. 등록 한 번의 최대 크기는 NIC가
-정하고, 그보다 큰 영역은 조각으로 나눕니다. 기본 상한은 1 TiB입니다. GPU
-메모리는 기본으로 nvidia-peermem을 거칩니다.</p>
+CPU 메모리인지, 어느 GPU인지 정합니다. NIC는 GPU 메모리도 직접 읽고
+씁니다. 등록 한 번의 최대 크기는 NIC 값과 1 TiB 가운데 작은 쪽이고,
+그보다 큰 영역은 조각으로 나눕니다. GPU 메모리는 기본으로
+nvidia-peermem이라는 kernel module을 거치고, 그 module이 없으면 등록이
+실패합니다.</p>
 <p><strong>[3]</strong> 다 끝나면 segment 설명 전체를 TE metadata에 한
 번 다시 올립니다. NIC 수만큼 등록하고 설명까지 다시 씁니다. 그래서 매번
 하지 않고 한 번 등록해 두고 계속 씁니다. 4막에서 다시 나옵니다.</p>
 <h2 id="n10">10. s08 segment 설명과 metadata (1.5분, 끝나면 누적
-13.25분)</h2>
+14.25분)</h2>
 <p><strong>[0]</strong> 상대 메모리에 쓰려면 상대의 설명이 있어야
 합니다.</p>
 <p><strong>[1]</strong> 설명에는 셋이 있습니다. NIC 목록, buffer 목록과
-NIC별 key, 그리고 topology입니다. 이름으로 찾습니다.</p>
+NIC별 key, 그리고 topology입니다. 이름으로 찾습니다. 이름은 init 때 준
+것이고, Store에서는 host:port 꼴입니다. 이 port는 이름표일 뿐이고
+handshake port는 따로 고릅니다.</p>
 <p><strong>[2]</strong> 두는 곳은 넷 가운데 하나입니다. etcd, redis,
 HTTP 서버, 그리고 P2PHANDSHAKE입니다. 마지막은 서버 없이 처음 연결할 때
-서로 교환하는 방식입니다. 하나 조심할 것은 주소에 scheme을 빼면 etcd로
-본다는 점입니다.</p>
+서로 교환하는 방식입니다. 주소가 redis://로 시작하면 redis, http://면
+HTTP 서버입니다. 조심할 것은 host:port만 쓰면 etcd로 본다는
+점입니다.</p>
 <p><strong>[3]</strong> 한 번 받은 설명은 계속 씁니다. 기본 설정에서는
 주기적으로 다시 읽지 않습니다. 쓰려는 주소가 받아 둔 설명에 없거나,
 실패한 뒤 상대 NIC를 바꿔 다시 보낼 때 다시 읽습니다.</p>
-<h2 id="n11">11. s09 연결 handshake (1.5분, 끝나면 누적 14.75분)</h2>
+<h2 id="n11">11. s09 연결 handshake (1.5분, 끝나면 누적 15.75분)</h2>
 <p><strong>[0]</strong> 처음 쓰는 NIC 쌍에는 연결이 필요합니다. 양쪽
-TE는 각자 RPC port를 하나씩 엽니다.</p>
+TE는 각자 RPC port를 하나씩 엽니다. 15000에서 17000 사이에서 random으로
+고릅니다.</p>
 <p><strong>[1]</strong> 노드 A가 TCP로 짧은 message를 보냅니다. 길이,
 종류, 그리고 JSON입니다. 처음 쓰는 NIC 쌍일 때만 합니다.</p>
 <p><strong>[2]</strong> 주고받는 것은 QP 번호, GID와 LID, 그리고 어느
-서버의 어느 NIC인지입니다. 상대는 자기 QP 번호를 돌려줍니다.</p>
-<p><strong>[3]</strong> 양쪽이 QP를 RTR, RTS로 옮기고, 준비됐다는 ACK가
-오가면 끝입니다. 이제부터는 상대 CPU 없이 읽고 씁니다. 서버 없는
-P2PHANDSHAKE 방식은 segment 설명을 같은 port로 openSegment 때 먼저
+서버의 어느 NIC인지입니다. GID와 LID는 상대 NIC를 찾아가는 network
+주소입니다. 상대는 자기 QP 번호를 돌려줍니다.</p>
+<p><strong>[3]</strong> 양쪽이 QP의 상태를 차례로 옮깁니다. RTR은 받을
+준비, RTS는 보낼 준비입니다. 준비됐다는 ACK가 오가면 끝입니다.
+이제부터는 상대 CPU 없이 읽고 씁니다. 서버 없는 P2PHANDSHAKE 방식은
+segment를 열 때, 곧 openSegment 때 그 설명을 같은 port로 먼저
 받습니다.</p>
-<h2 id="n12">12. s10 topology matrix (1분, 끝나면 누적 15.75분)</h2>
+<h2 id="n12">12. s10 topology matrix (1분, 끝나면 누적 16.75분)</h2>
 <p><strong>[0]</strong> NIC가 여럿이면 어느 것을 쓸까요? 서버 하나에
 NUMA가 둘, NUMA마다 CPU와 GPU와 NIC 둘이 있다고 합시다.</p>
 <p><strong>[1]</strong> TE는 메모리 위치마다 NIC 목록을 두 줄로
@@ -187,63 +204,61 @@ preferred입니다.</p>
 <p><strong>[3]</strong> 내 NIC는 내 표로, 상대 NIC는 상대가 올린 표로
 고릅니다.</p>
 <h2 id="n13">13. s11 slice, endpoint, completion (2분, 끝나면 누적
-17.75분)</h2>
+18.75분)</h2>
 <p><strong>[0]</strong> 요청 하나가 NIC에 올라가는 과정입니다. 1 MiB
 요청을 예로 듭니다.</p>
 <p><strong>[1]</strong> 먼저 64 KiB slice로 자릅니다. 1 MiB면
-16개입니다. 끝자리가 조금 남으면 따로 자르지 않고 앞 조각에
+16개입니다. 끝자리가 16 KiB 이하로 남으면 따로 자르지 않고 앞 조각에
 붙입니다.</p>
 <p><strong>[2]</strong> local NIC는 요청마다 하나 고릅니다. 방금 본
-topology 표의 preferred에서 고릅니다.</p>
+topology 표의 preferred에서 고르고, 둘이면 번갈아 나옵니다. 상대 NIC는
+slice마다 고르지만 같은 상대 MR이면 앞의 것을 씁니다.</p>
 <p><strong>[3]</strong> local NIC와 상대 NIC의 쌍을 endpoint라고
-부릅니다. endpoint마다 RC QP가 기본 둘입니다. 처음 쓰는 쌍이면 앞에서 본
-handshake를 합니다.</p>
-<p><strong>[4]</strong> slice 하나가 work request 하나입니다. one-sided
-WRITE나 READ라서 상대 CPU는 모릅니다. NIC마다 worker thread 둘이 post도
-하고 자기 completion queue도 poll합니다. slice가 모두 끝났을 때 다
-성공했으면 COMPLETED, 하나라도 실패했으면 FAILED입니다.</p>
-<h2 id="n14">14. s12 실패하면 (1.5분, 끝나면 누적 19.25분)</h2>
+부릅니다. endpoint마다 RC QP가 기본 둘입니다. RC는 도착과 순서를 NIC가
+보장하는 연결 방식입니다. 둘로 둔 이유는 적혀 있지 않습니다. 처음 쓰는
+쌍이면 앞에서 본 handshake를 합니다.</p>
+<p><strong>[4]</strong> slice 하나가 work request, 곧 NIC에게 주는 일
+하나입니다. queue에 넣는 것을 post라고 합니다. one-sided WRITE나
+READ라서 상대 CPU는 모릅니다. NIC마다 worker thread 둘이 post도 하고
+자기 completion queue도 poll합니다. slice가 모두 끝났을 때 다 성공했으면
+COMPLETED, 하나라도 실패했으면 FAILED입니다.</p>
+<h2 id="n14">14. s12 실패하면 (1.5분, 끝나면 누적 20.25분)</h2>
 <p><strong>[0]</strong> 실패는 slice 단위로 다룹니다.</p>
-<p><strong>[1]</strong> slice 하나를 최대 9번 시도합니다. 상대 쪽에서
-오류가 나면 내 NIC는 그대로 두고 상대 NIC를 바꿔 다시 보냅니다.</p>
-<p><strong>[2]</strong> 길을 쉬게 하기도 합니다. 상대 NIC 쪽 오류면 바꿔
-갈 길이 있을 때 첫 오류에 30초 쉽니다. 내 NIC는 내 쪽 오류만 세어 32번
-이어지면 5초 끕니다. 그래서 상대 하나가 죽어도 내 NIC는 꺼지지
-않습니다.</p>
+<p><strong>[1]</strong> slice 하나를 기본 9번까지 시도합니다. 오류
+completion에는 내 쪽 오류인지 상대 쪽 오류인지가 따로 적혀 옵니다. 상대
+쪽 오류면 내 NIC는 그대로 두고 상대 NIC를 바꿔 다시 보냅니다.</p>
+<p><strong>[2]</strong> 길을 쉬게 하기도 합니다. 길은 내 NIC에서 상대
+segment의 한 NIC까지입니다. 상대 쪽 오류면 바꿔 갈 길이 있을 때 첫
+오류에 30초 쉽니다. 내 NIC는 내 쪽 오류만 세어 32번 이어지면 5초 끕니다.
+그래서 상대 하나가 죽어도 내 NIC는 꺼지지 않습니다.</p>
 <p><strong>[3]</strong> 시간 제한은 기본으로 꺼져 있습니다. 오류가 오면
 9번 시도 뒤 FAILED로 끝나지만, completion이 끝내 오지 않으면 끊을 장치가
 없습니다. Python TransferEngine은 30초에 byte당 1 ns를 더한 제한이
 있습니다.</p>
 <h2 id="n15">15. s13 여러 NIC: 문서와 code (1분, 끝나면 누적
-20.25분)</h2>
+21.25분)</h2>
 <p><strong>[0]</strong> NIC가 여럿이면 다 쓸까요?</p>
 <p><strong>[1]</strong> 설계 문서는 slice마다 다른 경로를 쓸 수 있다고
-합니다. code는 다릅니다. NIC는 요청마다 하나 고릅니다. 한 번의
-submitTransfer 안에서 같은 메모리 영역이 이어지면 앞에서 고른 NIC를
-그대로 씁니다.</p>
-<p><strong>[2]</strong> Store는 object 하나를 16 MiB 이하 요청 여럿으로
-나눠 한 번에 냅니다. 모두 같은 메모리 영역이라 같은 NIC로 나갑니다.
-NIC는 호출이 바뀔 때 새로 고릅니다. 여러 NIC는 여러 호출이 나눠 씁니다.
-RDMA 장치 없이 이 선택 함수만 NIC 둘을 가정해 돌려 봤습니다. 실제
-대역폭은 재지 않았습니다.</p>
-<h2 id="n16">16. s14 transport 고르기 (1분, 끝나면 누적 21.25분)</h2>
+하지만 code는 다릅니다. NIC는 요청마다 하나 고릅니다. 한 submitTransfer
+안에서 같은 MR이 이어지면 앞에서 고른 NIC를 그대로 씁니다.</p>
+<p><strong>[2]</strong> Store의 put은 object 하나를 16 MiB 이하 요청
+여럿으로 나눠 한 번에 냅니다. get은 요청 하나입니다. 모두 같은 MR이라
+같은 NIC로 나갑니다. NIC는 호출이 바뀔 때 새로 고르니, 여러 NIC는 여러
+호출이 나눠 씁니다. RDMA 장치 없이 이 선택 함수만 NIC 둘로 돌려
+봤습니다. 대역폭은 재지 않았습니다.</p>
+<h2 id="n16">16. s14 transport 고르기 (1분, 끝나면 누적 22.25분)</h2>
 <p><strong>[0]</strong> RDMA 말고도 길이 많습니다.</p>
 <p><strong>[1]</strong> 시작할 때 설치하는 순서입니다. 환경 변수로 TCP나
-공유 메모리를 강제하지 않았다면, HCA가 보이는 순간 RDMA 계열을
-설치합니다. 없으면 TCP입니다.</p>
+공유 메모리를 강제하지 않았다면, HCA, 곧 RDMA NIC가 보이는 순간 RDMA
+계열을 설치합니다. 없으면 TCP입니다.</p>
 <p><strong>[2]</strong> 요청마다는 상대가 정합니다. 상대 segment가 올린
 protocol로 transport를 고릅니다. 하나 함정이 있습니다. Python
 TransferEngine은 tcp를 줘도 HCA가 보이면 RDMA를 설치합니다. TCP만 쓰려면
-환경 변수로 강제해야 합니다.</p>
-<h2 id="n17">17. s15 TENT (0.5분, 끝나면 누적 21.75분)</h2>
-<p><strong>[0]</strong> 다음 판 TE가 code 안에 있습니다. TENT입니다.</p>
-<p><strong>[1]</strong> slice마다 경로를 고르고 transport를 넘어
-failover합니다. 여러 NIC 문제를 푸는 방향입니다.</p>
-<p><strong>[2]</strong> 다만 pip wheel에는 들어 있지 않습니다.</p>
-<h2 id="n18">18. n2 Store의 구성 (0.25분, 끝나면 누적 22분)</h2>
+MC_FORCE_TCP로 강제합니다. Store에 tcp를 주면 TCP만 설치합니다.</p>
+<h2 id="n17">17. n2 Store의 구성 (0.25분, 끝나면 누적 22.5분)</h2>
 <p><strong>[0]</strong> 정리하면 TE는 등록한 메모리 사이를 one-sided로
 옮깁니다. 그 주소는 master가 정합니다.</p>
-<h2 id="n19">19. s16 두 control plane (1.5분, 끝나면 누적 23.5분)</h2>
+<h2 id="n18">18. s16 두 control plane (1.5분, 끝나면 누적 24분)</h2>
 <p><strong>[0]</strong> Store의 API는 put과 get입니다. key 하나의 값이
 object이고, 그 사본이 replica입니다. 다시 이 배치에서 가운데 둘이
 control plane입니다.</p>
@@ -251,38 +266,40 @@ control plane입니다.</p>
 자리가 어디인지, 언제 지울지를 압니다. master binary는 TE를 link하지도
 않습니다. 바이트를 볼 일이 없습니다.</p>
 <p><strong>[2]</strong> 아래의 TE metadata는 2막에서 본 segment 설명을
-둡니다. 둘 다 metadata지만 하나는 key의 위치, 하나는 NIC와
-rkey입니다.</p>
+둡니다. 둘 다 metadata지만 하나는 key의 위치, 하나는 NIC와 rkey입니다.
+TE는 master 없이 혼자 쓸 수도 있습니다. 7막의 PD 전송이 그렇습니다. TE
+metadata 서버가 죽어도 받아 둔 설명으로는 계속 옮기고, 새 segment를
+열거나 메모리를 새로 등록하는 일만 실패합니다.</p>
 <p><strong>[3]</strong> 바이트는 노드 A에서 노드 B의 segment로 직접
 갑니다. master를 지나지 않습니다.</p>
-<h2 id="n20">20. s17 master가 들고 있는 것 (1.5분, 끝나면 누적
-25분)</h2>
+<h2 id="n19">19. s17 master가 들고 있는 것 (1.5분, 끝나면 누적
+25.5분)</h2>
 <p><strong>[0]</strong> master의 메모리 안을 봅니다.</p>
 <p><strong>[1]</strong> key 하나마다 이것을 듭니다. 크기와 누가 언제
 쓰기 시작했는지, lease, pin과 group, 그리고 replica 목록입니다. 여기서
 pin은 kernel의 page pin이 아니라 지우지 말라는 표입니다. replica마다
 종류와 상태와 위치가 있습니다.</p>
-<p><strong>[2]</strong> key는 hash로 1024개 shard에 나눠 잠급니다. 같은
-key에 여러 단계로 쓰는 일은 따로 stripe lock으로 줄을 세웁니다.</p>
+<p><strong>[2]</strong> key는 hash로 1024개 shard에 나눠 잠급니다.
+PutStart와 UpsertStart는 key의 hash로 고른 lock 4096개 가운데 하나를
+잡고 줄을 섭니다.</p>
 <p><strong>[3]</strong> RPC는 66개입니다. put, get, remove, segment,
 ping, SSD offload 같은 것입니다. 그런데 data를 나르는 RPC는 하나도
 없습니다. 모두 위치와 상태를 주고받습니다.</p>
-<h2 id="n21">21. s18 segment와 allocator (1.5분, 끝나면 누적
-26.5분)</h2>
+<h2 id="n20">20. s18 segment와 allocator (1.5분, 끝나면 누적 27분)</h2>
 <p><strong>[0]</strong> master가 보는 segment입니다.</p>
-<p><strong>[1]</strong> 여기서 segment는 client가 master에 내놓은 DRAM
-영역입니다. 이름, base 주소, 크기, TE 주소 넷뿐입니다. base는 노드 B의
-client 프로세스 안의 가상 주소입니다. master는 그 메모리를 만지지 않고,
-그 위에서 offset 계산만 합니다. 그 결과가 put 때 돌려주는
-주소입니다.</p>
-<p><strong>[2]</strong> segment마다 allocator가 하나 있습니다. 기본은
-offset allocator입니다. replica 하나는 object 전체를 담는 연속 구간
-하나입니다. master가 object를 여러 segment에 나눠 담지 않습니다. 그래서
-큰 object에는 연속된 빈 자리가 필요합니다.</p>
-<p><strong>[3]</strong> cachelib allocator를 고를 수도 있습니다. 그러면
-object가 16 MiB 조금 안 되는 크기로 제한됩니다.</p>
-<h2 id="n22">22. s19 replica를 둘 segment 고르기 (1.5분, 끝나면 누적
-28분)</h2>
+<p><strong>[1]</strong> 여기서 segment는 client가 master에 내놓은
+DRAM입니다. 칸은 이름, base 주소, 크기, TE 주소에 id, protocol, host
+id까지 일곱입니다. base는 B의 client 프로세스의 가상 주소이고, master는
+그 위에서 계산만 합니다. 그 결과가 put 때 주는 주소입니다.</p>
+<p><strong>[2]</strong> segment마다 allocator가 하나 있고, 기본은 offset
+allocator입니다. replica 하나는 object 전체를 담는 연속 구간 하나이고,
+여러 segment에 나누지 않습니다. 그래서 큰 object에는 연속된 빈 자리가
+필요합니다. 빈 자리를 합하면 넉넉해도 연속 구간이 없으면 다른 segment를
+찾고, 없으면 PutStart가 실패합니다.</p>
+<p><strong>[3]</strong> cachelib을 고르면 slab이 16 MiB라서 object도
+그보다 조금 작게 제한됩니다.</p>
+<h2 id="n21">21. s19 replica를 둘 segment 고르기 (1.5분, 끝나면 누적
+28.5분)</h2>
 <p><strong>[0]</strong> replica를 어느 segment에 둘까요?</p>
 <p><strong>[1]</strong> 기본 전략은 random입니다. 지정한 segment가
 있으면 먼저 보고, 없으면 무작위 위치에서 시작해 차례로 봅니다.
@@ -293,7 +310,7 @@ replica끼리는 서로 다른 segment에 둡니다.</p>
 자리가 하나뿐이면 하나만 두고 성공합니다. 경고와 metric만 남습니다.
 그래서 replica 수는 보장이 아니라 best-effort입니다. 아래는 put에 넘기는
 설정입니다. preferred segment도 힌트일 뿐입니다.</p>
-<h2 id="n23">23. s20 replica 종류 (1분, 끝나면 누적 29분)</h2>
+<h2 id="n22">22. s20 replica 종류 (1분, 끝나면 누적 29.5분)</h2>
 <p><strong>[0]</strong> replica 종류마다 읽는 쪽이 다릅니다.</p>
 <p><strong>[1]</strong> 메모리 replica는 master가 주소까지 압니다.
 요청한 client가 TE로 직접 읽습니다. SSD replica는 다릅니다. master는
@@ -301,32 +318,33 @@ replica끼리는 서로 다른 segment에 둡니다.</p>
 <p><strong>[2]</strong> 공유 파일시스템에 두는 종류는 경로가 있어 요청한
 client가 직접 읽습니다. 이름과 달리 DISK가 공유 파일시스템이고, 노드의
 SSD는 LOCAL_DISK입니다. 상태는 사실상 둘입니다. 쓰는 중과 끝남입니다.
-설계 문서의 초기 상태는 code에서 쓰이지 않습니다.</p>
-<h2 id="n24">24. s21 global segment와 local buffer (1.5분, 끝나면 누적
-30.5분)</h2>
+문서의 첫 상태 INITIALIZED는 code가 쓰지 않습니다.</p>
+<h2 id="n23">23. s21 global segment와 local buffer (1.5분, 끝나면 누적
+31분)</h2>
 <p><strong>[0]</strong> client가 갖는 메모리는 둘입니다. 이름이 비슷해서
 자주 헷갈립니다.</p>
 <p><strong>[1]</strong> global segment는 남이 쓰는 자리입니다. TE에
-등록하고 master에 mount합니다. 다른 노드의 replica가 여기에 들어옵니다.
-pool에 내놓는 용량입니다.</p>
+등록하고 master에 mount합니다. 다른 노드의 replica도, 내 replica도
+여기에 들어올 수 있습니다. pool에 내놓는 용량입니다.</p>
 <p><strong>[2]</strong> local buffer는 내 복사본이 지나는 자리입니다.
-엔진의 메모리는 TE에 등록돼 있지 않습니다. 그래서 등록된 local buffer로
-한 번 복사합니다.</p>
+기본 put과 get에서는 엔진의 메모리가 TE에 등록돼 있지 않아서, 등록된
+local buffer로 한 번 복사합니다. 4막에서 셉니다.</p>
 <p><strong>[3]</strong> 기본값이 진입점마다 다릅니다. Python setup에
 dict로 주면 둘 다 16 MiB입니다. 위치 인자로는 꼭 줘야 합니다. 환경
-변수로 읽으면 약 3 GiB와 1 GiB입니다. 데몬은 4 GB와 0입니다. 데몬은
-엔진이 넘겨준 공유 메모리를 local buffer로 씁니다.</p>
-<h2 id="n25">25. s56 이름 정리: segment, buffer, 주소 (1분, 끝나면 누적
-31.5분)</h2>
-<p><strong>[0]</strong> 같은 메모리가 이름을 여럿 가집니다. 위 띠는 노드
-B의 client가 잡은 DRAM 영역입니다.</p>
+변수로 읽으면 3.125 GiB와 1 GiB, 데몬은 4 GiB와 0입니다. 데몬은 엔진이
+넘겨준 공유 메모리를 local buffer로 씁니다.</p>
+<h2 id="n24">24. s56 이름 정리: segment, buffer, 주소 (1분, 끝나면 누적
+32분)</h2>
+<p><strong>[0]</strong> 같은 메모리에 이름이 여럿입니다. 위 띠는 B의
+client가 잡은 DRAM입니다.</p>
 <p><strong>[1]</strong> TE에서는 한 프로세스가 등록한 영역 전체가
 segment 하나입니다. 이름과 rkey가 TE metadata에 올라갑니다.</p>
-<p><strong>[2]</strong> 같은 영역을 master에 mount하면 master의 segment,
-곧 global segment입니다. master는 여기서 자리를 나눕니다.</p>
+<p><strong>[2]</strong> 이 영역을 master에 mount하면 global
+segment입니다. master는 여기서 자리를 나눕니다.</p>
 <p><strong>[3]</strong> 그 주소는 B 프로세스의 가상 주소입니다. local
-buffer와, 엔진이 잡아 등록한 엔진 buffer는 mount하지 않습니다.</p>
-<h2 id="n26">26. s22 client 초기화 (1.5분, 끝나면 누적 33분)</h2>
+buffer와 엔진 buffer는 mount하지 않습니다. 엔진 buffer는 엔진이 등록한
+CPU나 GPU 메모리입니다. 6막의 SSD도 segment가 됩니다.</p>
+<h2 id="n25">25. s22 client 초기화 (1.5분, 끝나면 누적 33.5분)</h2>
 <p><strong>[0]</strong> client가 뜰 때의 순서입니다.</p>
 <p><strong>[1]</strong> 먼저 master에 연결합니다. HA로 띄웠으면 leader가
 누구인지 따라갑니다. 다음으로 TE를 init하고 transport를 설치합니다.</p>
@@ -338,8 +356,8 @@ mount합니다. 이 mount는 파일시스템이 아니라 메모리를 master의
 <p><strong>[3]</strong> 그 뒤로 1초마다 Ping을 보냅니다. 첫 Ping의 답은
 다시 mount하라는 NEED_REMOUNT입니다. 정상입니다. 처음 mount는 자리만
 올리고, master가 정상 client 목록에 넣는 것은 다시 mount할 때뿐이기
-때문입니다.</p>
-<h2 id="n27">27. s23 client의 두 형태 (1.5분, 끝나면 누적 34.5분)</h2>
+때문입니다. 그 사이에도 자리는 나눠 줍니다.</p>
+<h2 id="n26">26. s23 client의 두 형태 (1.5분, 끝나면 누적 35분)</h2>
 <p><strong>[0]</strong> client는 어디에서 돌까요? 둘 가운데
 하나입니다.</p>
 <p><strong>[1]</strong> 첫째, 추론 엔진 프로세스 안에서 돕니다.
@@ -351,45 +369,47 @@ embedded라고 부르고 가장 흔합니다. 엔진이 TE와 segment를 갖습�
 공유 메모리의 fd는 Unix socket으로 넘깁니다. 이것이 standalone입니다.
 엔진은 global segment로 0을 내놓고 붙기만 합니다. 엔진이 재시작해도
 데몬의 segment와 cache는 남습니다.</p>
-<h2 id="n28">28. n3 put과 get의 일생 (0.25분, 끝나면 누적 34.75분)</h2>
-<p><strong>[0]</strong> 이제 put 하나를 처음부터 끝까지 따라갑니다. 위의
-파란 선과 아래 주황 선이 어떤 순서로 쓰이는지 봅니다.</p>
-<h2 id="n29">29. s24 put 한 번 (3분, 끝나면 누적 37.75분)</h2>
-<p><strong>[0]</strong> put 하나를 처음부터 끝까지 따라갑니다. 무대는
-여섯 칸입니다. 왼쪽 둘이 노드 A의 추론 엔진과 Store client, 가운데가
-master, 오른쪽 셋이 노드 B입니다. 이 무대는 SSD 막까지 계속 씁니다.</p>
+<h2 id="n27">27. n3 put과 get의 일생 (0.25분, 끝나면 누적 35.25분)</h2>
+<p><strong>[0]</strong> 이제 put 하나를 처음부터 끝까지 따라갑니다. 파란
+선은 master와의 RPC, 주황 선은 RDMA로 옮기는 바이트입니다.</p>
+<h2 id="n28">28. s24 put 한 번 (2.5분, 끝나면 누적 37.75분)</h2>
+<p><strong>[0]</strong> 무대는 여섯 칸입니다. 왼쪽 둘이 노드 A의 추론
+엔진과 Store client, 가운데가 master, 오른쪽 셋이 노드 B입니다. 이
+무대는 SSD 막까지 계속 씁니다.</p>
 <p><strong>[1]</strong> 엔진이 put을 부릅니다. client는 먼저 값을 local
-buffer로 복사합니다. 그리고 16 MiB 이하 조각으로 나눕니다. 첫 번째
-복사입니다.</p>
+buffer로 복사합니다. 이것이 첫 번째 복사입니다. 그리고 16 MiB 이하
+조각으로 나눕니다.</p>
 <p><strong>[2]</strong> 다음으로 master에 PutStart를 보냅니다. key와
 크기와 설정입니다. master는 자리만 잡아 줍니다. replica의 상태는
 PROCESSING, 쓰는 중입니다. COMPLETE가 되기 전에는 get이 이 replica를
-보지 않습니다. 돌아오는 것은 노드 B segment 안의 주소입니다.</p>
+보지 않습니다. 돌아오는 것은 노드 B segment 안의 주소입니다. 그
+segment의 rkey는 TE metadata에서 받아 둔 설명에 있습니다.</p>
 <p><strong>[3]</strong> 이제 주황 화살표입니다. client의 TE가 그 주소에
-RDMA WRITE를 합니다. master는 이 바이트를 보지 않습니다. 노드 B의 CPU도
+RDMA WRITE를 합니다. master는 이 바이트를 보지 않습니다. B의 CPU도
 모릅니다.</p>
 <p><strong>[4]</strong> 다 쓰면 PutEnd를 보냅니다. master는 상태를
 COMPLETE로 바꿉니다. 이때 lease는 0, 즉 쓴 시각이 기한입니다. lease는
 읽는 동안 지우지 않겠다는 기한입니다. 그래서 메모리가 차면 방금 쓴
 object도 지울 수 있습니다.</p>
 <p><strong>[5]</strong> replica를 여럿 달라고 하면 WRITE를 하나씩 차례로
-합니다. 병렬이 아닙니다. 전송이 실패하면 PutRevoke로 자리를 돌려줍니다.
-정리하면 put 한 번은 RPC 둘과, replica마다 RDMA WRITE 한 번입니다.</p>
-<h2 id="n30">30. s25 get 한 번 (2분, 끝나면 누적 39.75분)</h2>
+합니다. 병렬이 아닌 이유는 적혀 있지 않습니다. 전송이 실패하면
+PutRevoke로 자리를 곧바로 돌려줍니다. 정리하면 put 한 번은 RPC 둘과,
+replica마다 RDMA WRITE 한 번입니다.</p>
+<h2 id="n29">29. s25 get 한 번 (1.5분, 끝나면 누적 39.25분)</h2>
 <p><strong>[0]</strong> get은 더 짧습니다.</p>
 <p><strong>[1]</strong> client가 master에 GetReplicaList를 보냅니다.
-master는 읽을 수 있는 replica의 목록을 돌려줍니다. 그리고 그 object에
-lease 10초를 겁니다. 10초 동안은 지우지 않겠다는 약속입니다.</p>
+master는 읽을 수 있는 replica 목록을 돌려주고, 그 object에 lease 10초를
+겁니다. 10초 동안 지우지 않겠다는 약속입니다.</p>
 <p><strong>[2]</strong> replica가 여럿이면 client가 고릅니다. 같은
-프로세스의 메모리가 먼저, 그다음 다른 노드의 메모리, 그다음 SSD와 파일
-순서입니다. NVMe-oF replica는 화면에서 뺐습니다.</p>
+프로세스의 메모리, 다른 노드의 메모리, SSD와 파일 순서입니다.</p>
 <p><strong>[3]</strong> 고른 replica에서 local buffer로 RDMA READ를
-합니다. 이번에도 노드 B의 CPU는 모릅니다.</p>
+합니다. B의 CPU는 모릅니다.</p>
 <p><strong>[4]</strong> 다 받으면 lease 안에 끝났는지 봅니다. 기본으로
-꺼진 checksum을 켰다면 그것도 봅니다. 늦게 끝났으면 바이트를 받았어도
+꺼진 checksum을 켰다면 그것도 봅니다. 기한은 client가 요청을 보낸
+시각부터 자기 시계로 셉니다. 늦게 끝났으면 바이트를 받았어도
 LEASE_EXPIRED로 실패시킵니다. 그 사이에 지워졌을 수 있기 때문입니다.
-마지막으로 Python bytes로 한 번 더 복사해서 엔진에 돌려줍니다.</p>
-<h2 id="n31">31. s26 복사 횟수 (2분, 끝나면 누적 41.75분)</h2>
+마지막으로 Python bytes로 한 번 더 복사해 돌려줍니다.</p>
+<h2 id="n30">30. s26 복사 횟수 (2분, 끝나면 누적 41.25분)</h2>
 <p><strong>[0]</strong> 복사가 몇 번 생기는지 봅니다. 여기서 복사는
 CPU나 GPU가 하는 memcpy만 셉니다. NIC의 전송은 세지 않습니다.</p>
 <p><strong>[1]</strong> 위 줄은 put과 get입니다. 넣을 때 local buffer로
@@ -397,13 +417,15 @@ CPU나 GPU가 하는 memcpy만 셉니다. NIC의 전송은 세지 않습니다.<
 object보다 커야 합니다. 아래 줄은 put_from과 get_into입니다. 엔진이 잡은
 buffer를 미리 등록해 두면 TE가 그 buffer를 바로 읽고 씁니다. 복사가
 없습니다. GPU buffer는 다릅니다. get_into 하나로 받으면 local buffer로
-받은 뒤 GPU로 한 번 더 복사합니다. 등록했어도 그렇습니다.
-batch_get_into는 GPU로 바로 받습니다.</p>
+받은 뒤, 부른 thread가 cudaMemcpy로 GPU에 한 번 더 복사합니다.
+등록했어도 그렇고, 그 이유는 적혀 있지 않습니다. batch_get_into와
+put_from은 GPU와 바로 주고받습니다. 엔진마다 몇 번인지는 7막에서
+셉니다.</p>
 <p><strong>[2]</strong> 같은 노드라고 memcpy를 하지는 않습니다. memcpy가
 켜져 있고 replica가 이 프로세스 안에 있을 때만입니다. 기본으로 켜지는
 것은 TCP만 쓸 때뿐입니다. 그래서 RDMA에서는 자기 segment에도 loopback을
 탑니다.</p>
-<h2 id="n32">32. s27 batch (1분, 끝나면 누적 42.75분)</h2>
+<h2 id="n31">31. s27 batch (1분, 끝나면 누적 42.25분)</h2>
 <p><strong>[0]</strong> 여러 key를 한 번에 넣을 때입니다.</p>
 <p><strong>[1]</strong> RPC는 BatchPutStart 한 번입니다. 다만 master
 안에서는 key마다 따로 자리를 잡습니다.</p>
@@ -413,19 +435,23 @@ batch_get_into는 GPU로 바로 받습니다.</p>
 <p><strong>[3]</strong> 끝나면 BatchPutEnd입니다. transaction은
 아닙니다. key마다 성공하거나 실패합니다. Python 호출은 동기이고 GIL을
 풀어 줍니다.</p>
-<h2 id="n33">33. s28 error code (1분, 끝나면 누적 43.75분)</h2>
+<h2 id="n32">32. s28 error code (1.5분, 끝나면 누적 43.75분)</h2>
 <p><strong>[0]</strong> 자주 보는 error입니다. Python에서는 음수로
 돌아옵니다.</p>
 <p><strong>[1]</strong> 앞의 넷은 key가 없거나, 쓰는 중이거나, 자리가
 없거나, 전송이 실패한 경우입니다. 60초는 Store client가 TE 전송의 끝을
-기다리는 한도이고, 바꿀 수 없는 값입니다.</p>
+기다리는 한도이고, 바꿀 수 없는 값입니다. 포기해도 전송은 취소되지
+않습니다. put이면 자리를 곧바로 돌려주고 다음 put이 그 자리를 받는데,
+늦게 온 data가 그 key를 덮는 것을 TCP로 확인했습니다. maintainer는
+이것을 막으려고 60초로 길게 잡았다고 적었습니다. get 쪽의 같은 문제는
+issue가 열려 있습니다.</p>
 <p><strong>[2]</strong> 뒤의 셋은 lease와 크기에 관한 것입니다. 하나
 조심할 것은 get입니다. 없는 key도, buffer가 모자란 것도 빈 bytes로
-돌아옵니다. get만으로는 둘을 구별할 수 없습니다.</p>
-<h2 id="n34">34. m1 경로 (0.25분, 끝나면 누적 44분)</h2>
+돌아옵니다. 구별하려면 is_exist나 get_size를 먼저 부릅니다.</p>
+<h2 id="n33">33. m1 경로 (0.25분, 끝나면 누적 44분)</h2>
 <p><strong>[0]</strong> put은 RPC 둘과 replica마다 WRITE, 복사 횟수는
 등록이 가릅니다. 이제 수명을 봅니다.</p>
-<h2 id="n35">35. s29 lease (1.5분, 끝나면 누적 45.5분)</h2>
+<h2 id="n34">34. s29 lease (1.5분, 끝나면 누적 45.5분)</h2>
 <p><strong>[0]</strong> 읽기 하나에 붙는 약속을 봅니다. 왼쪽 점선이
 GetReplicaList를 보낸 때입니다.</p>
 <p><strong>[1]</strong> master는 그 object에 lease 10초를 겁니다. 그동안
@@ -437,22 +463,22 @@ force 없는 Remove는 거절되고, eviction은 그 object를 건너뜁니다.<
 지워지고 다른 것이 쓰였을 수 있기 때문입니다. deadline은 요청을 보낸
 시각부터 셉니다. checksum은 기본으로 꺼져 있어서, 기본 설정에서 보는
 것은 시간뿐입니다.</p>
-<h2 id="n36">36. s30 eviction: 언제, 얼마나 (2분, 끝나면 누적
-47.5분)</h2>
+<h2 id="n35">35. s30 eviction: 언제, 얼마나 (1.5분, 끝나면 누적
+47분)</h2>
 <p><strong>[0]</strong> 공간이 차면 지웁니다. Store가 cache인 가장
 직접적인 이유입니다. 위 띠가 DRAM segment 전체의 사용률이고, 지금
 95%입니다.</p>
 <p><strong>[1]</strong> 언제 지울까요? 두 경우입니다. 사용률이 90%를
 넘었거나, PutStart가 자리를 못 줬을 때입니다. 그러면 10 ms마다 깨는
-thread가 지웁니다. PutStart는 그 자리에서 지우지 않는다는 점을 기억해
-두세요. 조금 뒤에 다시 봅니다.</p>
+thread가 지웁니다. 어느 segment가 찼는지는 보지 않고 pool 전체로 셉니다.
+PutStart는 그 자리에서 지우지 않습니다. 조금 뒤에 다시 봅니다.</p>
 <p><strong>[2]</strong> 얼마나 지울까요? 식은 이렇습니다. 기본 5%,
 그리고 90%를 넘은 만큼을 더합니다.</p>
 <p><strong>[3]</strong> 95%면 0.10입니다. 그런데 이 비율은 byte가 아니라
 object 개수에 곱합니다. evict할 수 있는 object가 10만 개면 1만 개를
 지웁니다. object 크기가 제각각이면 풀리는 byte는 10%와 다릅니다. 큰
 object와 작은 object를 한 pool에 섞을 때 생각할 점입니다.</p>
-<h2 id="n37">37. s31 eviction: 무엇부터 (1.5분, 끝나면 누적 49분)</h2>
+<h2 id="n36">36. s31 eviction: 무엇부터 (1.5분, 끝나면 누적 48.5분)</h2>
 <p><strong>[0]</strong> 무엇부터 지울까요?</p>
 <p><strong>[1]</strong> 후보는 넷을 모두 만족하는 object입니다. hard
 pin이 아니고, lease가 끝났고, 쓰기가 끝났습니다. 그리고 SSD로 내리거나
@@ -465,8 +491,8 @@ LRU입니다. 안 읽힌 object는 쓴 시각이 deadline이라, 그 뒤에 읽�
 <p><strong>[3]</strong> 지우는 것은 메모리 replica뿐입니다. SSD 사본이
 있으면 object는 디스크에만 남아 계속 읽을 수 있습니다. 6막의 SSD가
 여기서 이어집니다.</p>
-<h2 id="n38">38. s32 soft pin, hard pin, group (1분, 끝나면 누적
-50분)</h2>
+<h2 id="n37">37. s32 soft pin, hard pin, group (1분, 끝나면 누적
+49.5분)</h2>
 <p><strong>[0]</strong> 지우지 말라고 표시하는 방법이 셋 있습니다.</p>
 <p><strong>[1]</strong> pin은 eviction을 막는 표입니다. soft pin은
 지우기를 미룹니다. 기본 30분, 최대 24시간입니다. 첫 COMPLETE부터 세고
@@ -474,31 +500,35 @@ LRU입니다. 안 읽힌 object는 쓴 시각이 deadline이라, 그 뒤에 읽�
 지웁니다. hard pin은 아예 지우지 않습니다.</p>
 <p><strong>[2]</strong> group은 한 항목을 이룬 여러 object를 묶습니다.
 하나를 읽으면 모두의 lease가 늘고, 지울 때는 함께 지웁니다.</p>
-<h2 id="n39">39. s33 put이 거절될 때 (1.5분, 끝나면 누적 51.5분)</h2>
+<h2 id="n38">38. s33 put이 거절될 때 (1.5분, 끝나면 누적 51분)</h2>
 <p><strong>[0]</strong> put이 들어가지 않는 경우가 셋 있습니다.</p>
-<p><strong>[1]</strong> 첫째, 자리가 없을 때입니다. 앞에서 말했듯
-PutStart는 그 자리에서 지우지 않습니다. 바로 실패합니다. 지우는 thread가
-돈 뒤 부르는 쪽이 다시 시도해야 합니다.</p>
+<p><strong>[1]</strong> 첫째, 자리가 없을 때입니다. PutStart는 그
+자리에서 지우지 않고 바로 실패합니다. 10 ms마다 깨는 thread가 지운 뒤
+부르는 쪽이 다시 시도해야 합니다.</p>
 <p><strong>[2]</strong> 둘째, 같은 key가 이미 있을 때입니다. client는
-이것을 성공으로 바꿉니다. 그래서 put은 0을 돌려주지만 값은 바뀌지
-않습니다. 덮어쓰려면 upsert를 씁니다. 가장 놓치기 쉬운 점입니다. 엔진
-연동에서는 key가 내용으로 만든 hash라서, 같은 key면 같은 KV입니다.</p>
+이것을 성공으로 바꿔 0을 돌려주지만 값은 바뀌지 않습니다. 덮어쓰려면
+upsert입니다. 엔진 연동에서는 key가 내용의 hash라 같은 key면 같은
+KV입니다.</p>
 <p><strong>[3]</strong> 셋째, 같은 key를 누가 쓰고 있을 때입니다.
-PutStart 뒤 30초 안이면 다음 put은 아무것도 쓰지 않고 0을 돌려줍니다.
-master는 쓰는 쪽이 살았는지 보지 않고 시간만 봅니다. 30초가 지나면 다음
-put이 그 key를 가져갑니다. 이전 자리는 600초 뒤에 풀립니다. 아직 RDMA로
-쓰고 있을 수 있어서입니다.</p>
-<h2 id="n40">40. s34 client가 사라질 때 (1.5분, 끝나면 누적 53분)</h2>
+PutStart 뒤 30초 안이면 다음 put은 쓰지 않고 0을 돌려줍니다. master는
+쓰는 쪽의 생존이 아니라 시간만 봅니다. 30초가 지나면 다음 put이 그 key를
+가져갑니다. 이전 자리는 600초가 지난 뒤 다음 정리 때 풀립니다. 정리는
+eviction 때나 600초마다라서 늦으면 20분 가까이 걸립니다. 쓰던 쪽이 아직
+쓰고 있을 수 있어서라고 RFC가 적습니다.</p>
+<h2 id="n39">39. s34 client가 사라질 때 (1.5분, 끝나면 누적 52.5분)</h2>
 <p><strong>[0]</strong> client는 1초마다 master에 Ping을 보내 살아
 있다고 알립니다. 그 Ping이 끊기면 어떻게 될까요?</p>
 <p><strong>[1]</strong> 기본값으로 10초 동안 소식이 없으면 SUSPECTED,
-다시 20초가 지나면 OFFLINE입니다. 10초면 SUSPECTED이고, 이때부터 그
-client의 SSD replica는 읽지 않습니다. 지우는 것은 합해서 약
-30초부터입니다. 앞 장의 30초와는 다른 timer입니다.</p>
+다시 20초가 지나면 OFFLINE입니다. SUSPECTED가 되면 그 client에 있는
+replica는 메모리든 SSD든 읽지 않고 새 자리도 주지 않습니다. 다른
+client에 replica가 있으면 그것을 읽고, 없으면 get은 -703입니다. 지우는
+것은 합해서 약 30초부터입니다. 앞 장의 30초와는 다른 timer입니다. 돌려
+보니 멈췄던 client가 30초 안에 돌아오면 그대로, 넘기면 빈 segment로 다시
+붙었습니다.</p>
 <p><strong>[2]</strong> OFFLINE이 되면 그 client가 내놓은 segment를
 unmount합니다. 그 위의 replica를 지우고, replica가 하나도 안 남은
 object를 지웁니다. 그 노드의 메모리에 있던 것은 사라집니다.</p>
-<h2 id="n41">41. s35 master가 바뀔 때 (1.5분, 끝나면 누적 54.5분)</h2>
+<h2 id="n40">40. s35 master가 바뀔 때 (1.5분, 끝나면 누적 54분)</h2>
 <p><strong>[0]</strong> master가 죽으면 어떻게 될까요? 위에 master 둘과
 etcd가 있습니다.</p>
 <p><strong>[1]</strong> HA를 켜면 etcd, redis, k8s 가운데 하나로
@@ -513,7 +543,7 @@ client는 master 주소 대신 etcd 주소를 받아 leader가 바뀌는 것을
 Redis HA로 돌려 보니 leader를 죽이고 9초 뒤 이전 key는 없었고, 첫 새
 put이 그 주소를 그대로 받았습니다. SSD 사본은 6막에서 보듯
 돌아옵니다.</p>
-<h2 id="n42">42. s36 OpLog와 snapshot (1.5분, 끝나면 누적 56분)</h2>
+<h2 id="n41">41. s36 OpLog와 snapshot (2분, 끝나면 누적 56분)</h2>
 <p><strong>[0]</strong> master의 기억을 넘기는 방법은 둘입니다.</p>
 <p><strong>[1]</strong> 첫째, OpLog입니다. leader가 바꾸는 것을 기록으로
 남기고 standby가 따라갑니다. 승격하면 그 기록으로 metadata를 다시
@@ -521,46 +551,49 @@ put이 그 주소를 그대로 받았습니다. SSD 사본은 6막에서 보듯
 보이고 나중에 영속됩니다. 바로 직전의 PutEnd는 잃을 수 있습니다.</p>
 <p><strong>[2]</strong> 둘째, snapshot입니다. 600초마다 fork해서
 copy-on-write로 통째로 뜹니다. allocator가 offset일 때만 되고, 아니면
-flag를 켜도 조용히 동작하지 않습니다. OpLog를 쓰면 standby가 맡습니다.
-시작할 때 restore flag로 되살립니다. 정리하면, HA를 켤 때는 둘 중 하나를
-같이 켜야 합니다.</p>
-<h2 id="n43">43. s57 시간 한 장 (1분, 끝나면 누적 57분)</h2>
-<p><strong>[0]</strong> 4막과 5막에 시간이 많이 나왔습니다. 한 장으로
-모읍니다. 모두 기본값입니다.</p>
+flag를 켜도 조용히 꺼집니다. OpLog를 쓰면 standby가 맡습니다. 시작할 때
+restore flag로 되살리는데, 이때 lease가 지난 object는 지웁니다. 돌려
+보니 복원 전 10초 안에 읽힌 것만 돌아왔습니다. upstream issue가 열려
+있습니다. OpLog를 켜고 Redis HA로 돌려 보니 메모리 key가 같은 주소와
+바이트로 돌아왔습니다. 그래서 HA를 켤 때는 OpLog를 같이 켭니다.</p>
+<h2 id="n42">42. s57 시간 한 장 (1분, 끝나면 누적 57분)</h2>
+<p><strong>[0]</strong> 4막과 5막의 시간을 기본값으로 한 장에
+모읍니다.</p>
 <p><strong>[1]</strong> 읽기 쪽입니다. 쓴 직후 lease는 0, 읽으면
 10초입니다. 전송은 60초까지 기다립니다.</p>
 <p><strong>[2]</strong> 쓰는 중인 key는 30초가 지나면 다음 put이
-가져가고, 이전 자리는 600초 뒤 풀립니다.</p>
+가져가고, 이전 자리는 600초가 지난 뒤 정리 때 풀립니다.</p>
 <p><strong>[3]</strong> client는 1초마다 Ping합니다. 10초 없으면
-SUSPECTED, 다시 20초면 OFFLINE입니다. SSD 쪽은 10초마다 일을 가져가고,
-읽기 buffer는 5초 지킵니다.</p>
-<h2 id="n44">44. m2 수명 (0.25분, 끝나면 누적 57.25분)</h2>
+SUSPECTED, 다시 20초면 OFFLINE입니다. 6막의 SSD는 10초마다 일을 가져가고
+읽기 buffer는 5초 지킵니다. 30초는 2막의 상대 NIC 쉬기와 Python
+제한에도, 600초는 snapshot 주기에도 쓰입니다.</p>
+<h2 id="n43">43. m2 수명 (0.25분, 끝나면 누적 57.25분)</h2>
 <p><strong>[0]</strong> Store는 cache입니다. 읽은 뒤 10초만 지키고,
 개수로 지우고, 덮어쓰지 않고, 잊을 수 있습니다. 이제 SSD로 갑니다.</p>
-<h2 id="n45">45. s37 켜는 법과 backend (1분, 끝나면 누적 58.25분)</h2>
-<p><strong>[0]</strong> DRAM 아래에 SSD를 둘 수 있습니다. DRAM의
-object를 SSD에도 내려 두는 것을 offload라고 부릅니다. pool을 DRAM보다
-크게 만들려는 것입니다.</p>
-<p><strong>[1]</strong> 켜는 곳은 양쪽입니다. master에 flag, client에
-설정, 그리고 경로입니다. 경로는 미리 만들어 둔 directory여야 합니다.</p>
-<p><strong>[2]</strong> SSD에 쓰는 방식, backend는 다섯입니다. 기본은
-bucket입니다. 여러 object를 큰 file 하나에 이어 붙입니다. offset은 미리
-잡은 큰 file 하나를 나눠 씁니다. 다음 두 장에서 둘의 on-disk 모양을
-봅니다.</p>
-<h2 id="n46">46. s38 bucket의 on-disk (1.5분, 끝나면 누적 59.75분)</h2>
+<h2 id="n44">44. s37 켜는 법과 backend (1분, 끝나면 누적 58.25분)</h2>
+<p><strong>[0]</strong> DRAM 아래에 SSD를 둡니다. DRAM의 object를
+SSD에도 내려 두는 것이 offload입니다. pool을 DRAM보다 크게 하려는
+것입니다.</p>
+<p><strong>[1]</strong> 켜는 곳은 master의 flag, client의 설정과
+경로입니다. master만 켜면 말없이 안 쓰고, client만 켜면 setup이
+실패합니다. 경로는 미리 만든 directory여야 합니다.</p>
+<p><strong>[2]</strong> SSD에 쓰는 방식, backend는 다섯이고 기본은
+bucket입니다. 여러 object를 큰 file에 이어 붙입니다. offset은 미리 잡은
+큰 file을 나눠 씁니다. 다음 두 장에서 봅니다.</p>
+<h2 id="n45">45. s38 bucket의 on-disk (1.5분, 끝나면 누적 59.75분)</h2>
 <p><strong>[0]</strong> 기본 backend인 bucket의 directory를 봅니다.</p>
 <p><strong>[1]</strong> bucket file에는 key와 value를 그냥 이어
-붙입니다. header도 checksum도 없습니다. bucket 하나는 256 MiB나 500
-key에서 닫힙니다.</p>
+붙입니다. header도 checksum도 없습니다.</p>
 <p><strong>[2]</strong> 위치는 meta file에 따로 적습니다. key마다
 offset과 크기입니다. data는 fdatasync한 뒤에 meta를 씁니다. meta 자체는
 sync하지 않습니다. meta를 읽지 못하거나 해석이 실패한 bucket은 다시 뜰
 때 지웁니다. data 내용은 검사하지 않습니다.</p>
 <p><strong>[3]</strong> lock file이 하나 있어 한 directory를 한 client만
 씁니다. 용량 한도의 90%를 넘으면 80%까지, bucket 하나씩 통째로 지웁니다.
-한도는 기본으로 파일시스템의 90%라서, 파일시스템으로는 81%에서
-72%까지입니다. master에 먼저 알리고 지웁니다.</p>
-<h2 id="n47">47. s39 offset backend의 on-disk (1.5분, 끝나면 누적
+한도는 기본으로 파일시스템 용량의 90%라서, 파일시스템으로는 81%에서
+72%까지입니다. 같은 파일시스템을 쓰는 다른 프로그램은 세지 않습니다.
+master에 먼저 알리고 지웁니다.</p>
+<h2 id="n46">46. s39 offset backend의 on-disk (1.5분, 끝나면 누적
 61.25분)</h2>
 <p><strong>[0]</strong> offset backend는 모양이 다릅니다. 큰 file 하나를
 미리 잡아 둡니다.</p>
@@ -568,52 +601,57 @@ sync하지 않습니다. meta를 읽지 못하거나 해석이 실패한 bucket�
 DRAM segment를 나누는 것과 같은 allocator입니다.</p>
 <p><strong>[2]</strong> record마다 24 byte header가 있습니다. 길이, 순서
 번호, flag, CRC입니다. 그다음 key, 정렬용 빈칸, value입니다. value는
-record 시작에서 4 KiB 정렬입니다.</p>
+record 시작에서 4 KiB 정렬이라 O_DIRECT로 바로 씁니다.</p>
 <p><strong>[3]</strong> 재시작 뒤를 정하는 persist mode가 셋입니다. 기본
 disabled는 시작할 때 file을 비웁니다. relaxed는 주기적으로, strict는
 batch마다 checkpoint를 남깁니다. 이때 key 목록은 저장하지 않고 header를
 읽어 다시 세웁니다.</p>
-<h2 id="n48">48. s40 SSD 쓰기 (2분, 끝나면 누적 63.25분)</h2>
+<h2 id="n47">47. s40 SSD 쓰기 (2.5분, 끝나면 누적 63.75분)</h2>
 <p><strong>[0]</strong> SSD 쓰기를 따라갑니다. 노드 B의 segment에 memory
 replica가 있다고 합시다.</p>
 <p><strong>[1]</strong> offload를 켜면 PutEnd마다 master가 그 replica를
 가진 client 앞으로 SSD에 쓰라는 task를 쌓습니다. 쓰기가 끝날 때까지 그
 replica는 잡아 둡니다.</p>
 <p><strong>[2]</strong> 노드 B의 client는 10초마다 heartbeat로 그 task를
-가져갑니다. Ping과는 다른 RPC입니다. client가 당겨 가므로 디스크에
-닿기까지 한 주기 이상 걸립니다.</p>
+가져갑니다. Ping과는 다른 RPC입니다. 당겨 가므로 디스크까지 한 주기 이상
+걸립니다.</p>
 <p><strong>[3]</strong> client는 자기 segment의 포인터를 그대로
 pwritev에 넘깁니다. 기본은 page cache를 거칩니다. data를 쓰고
-fdatasync한 뒤 meta를 씁니다. 조심할 것이 있습니다. bucket은 이번 주기에
-받은 task로만 채웁니다. 다 못 채운 key는 다음 주기로 미루면서 master에는
-실패로 알리고, master는 그 task를 지웁니다. 다음 주기에 client는 task가
-없는 key를 건너뜁니다. 그래서 끝내 쓰이지 않습니다. 11개를 넣고 세
-주기를 봐도 하나도 가지 않았습니다.</p>
+fdatasync한 뒤 meta를 씁니다. bucket은 500 key나 256 MiB가 차야 닫히고,
+이번 주기에 받은 task로만 채웁니다. 덜 찬 bucket의 key는 client가 다음
+주기 몫으로 남겨 두지만, master에는 실패로 알려 master가 그 task를
+지웁니다. 다음 주기에 남겨 둔 key는 첫 bucket의 칸을 먼저 채우지만, task
+목록에 없어서 쓰이지 않습니다. 그 칸만큼 새 key가 덜 들어가고, 또 끝이
+남습니다. 64 KiB object를 꾸준히 넣어 보니 주기마다 300 key면 25%,
+700이면 72%, 1500이면 94%만 SSD에 갔습니다. 엔진이 주기마다 내는 key
+수는 재지 않았습니다. upstream issue가 열려 있습니다.</p>
 <p><strong>[4]</strong> 끝나면 master에 알리고, master는 LOCAL_DISK
 replica를 붙이고 잡아 둔 것을 풉니다.</p>
-<h2 id="n49">49. s41 write-through와 offload_on_evict (1분, 끝나면 누적
-64.25분)</h2>
-<p><strong>[0]</strong> 언제 SSD로 내릴지는 고를 수 있습니다.</p>
+<h2 id="n48">48. s41 write-through와 offload_on_evict (1분, 끝나면 누적
+64.75분)</h2>
+<p><strong>[0]</strong> 언제 SSD로 내릴지는 고릅니다.</p>
 <p><strong>[1]</strong> offload flag만 켜면 방금 본 대로 PutEnd마다 SSD
-사본을 만듭니다. put마다 SSD 쓰기 task가 생기고, queue가 차면
-버립니다.</p>
+쓰기 task가 생기고, queue가 차면 metric만 올리고 버립니다.</p>
 <p><strong>[2]</strong> 지울 때만 내리려면 offload_on_evict를 같이
 켭니다. eviction이 고른 object만 SSD로 보내고, 사본이 생길 때까지 메모리
-사본 하나를 남깁니다. 다만 OpLog를 켜면 이 경로는 동작하지 않습니다.
-OpLog를 쓰면서 SSD를 쓰려면 이 flag를 끄고 write-through로 둡니다.</p>
-<h2 id="n50">50. s42 SSD 읽기 (1.5분, 끝나면 누적 65.75분)</h2>
+사본을 남깁니다. bucket을 못 채우면 메모리에만 남습니다. 다만 OpLog를
+켜면 eviction이 SSD 사본 없이 지웁니다. OpLog를 쓰면서 SSD를 쓰려면 이
+flag를 끄고 write-through로 둡니다.</p>
+<h2 id="n49">49. s42 SSD 읽기 (1.5분, 끝나면 누적 66.25분)</h2>
 <p><strong>[0]</strong> 이번에는 읽기입니다. 노드 A가 SSD에만 있는
 object를 읽습니다.</p>
 <p><strong>[1]</strong> master의 답은 LOCAL_DISK, 그리고 소유자가 B라는
 것뿐입니다. master는 그 file이 디스크 어디에 있는지 모릅니다.</p>
 <p><strong>[2]</strong> 그래서 노드 A는 노드 B의 client에 RPC를
-보냅니다. B가 자기 SSD에서 읽어 자기 buffer에 올립니다. 여기서는 B의
-CPU가 일합니다. 반납 RPC는 자동으로 갑니다. 5초가 지나면 B가 회수하고,
-A도 늦은 읽기를 실패로 처리합니다.</p>
+보냅니다. B가 자기 SSD에서 읽어, 미리 등록해 둔 1280 MiB staging
+buffer에 올립니다. 여기서는 B의 CPU가 일합니다. CPU 수만큼의 thread가
+읽고, embedded면 엔진 프로세스 안의 thread입니다. 반납 RPC는 자동으로
+갑니다. 5초가 지나면 B가 회수하고, A도 늦은 읽기를 실패로
+처리합니다.</p>
 <p><strong>[3]</strong> B가 buffer 주소를 돌려주면 A가 TE READ로
 가져갑니다. RPC 둘, SSD 읽기, RDMA 한 번입니다. B가 죽으면 이 replica는
 읽을 수 없습니다.</p>
-<h2 id="n51">51. s43 기본 설정의 I/O (1분, 끝나면 누적 66.75분)</h2>
+<h2 id="n50">50. s43 기본 설정의 I/O (1분, 끝나면 누적 67.25분)</h2>
 <p><strong>[0]</strong> 기본 설정은 무엇으로 쓸까요?</p>
 <p><strong>[1]</strong> O_DIRECT는 io_uring 설정을 켰을 때만 씁니다.
 기본은 page cache입니다. 그래서 기본 설정에서 읽기를 재면 SSD가 아니라
@@ -621,30 +659,31 @@ page cache를 재기 쉽습니다.</p>
 <p><strong>[2]</strong> 켜도 다 바뀌지는 않습니다. thread마다 queue
 depth 32의 ring입니다. bucket의 쓰기는 여전히 page cache를 거칩니다.
 쓰기까지 O_DIRECT인 것은 offset backend뿐입니다.</p>
-<h2 id="n52">52. s44 용량과 full (1분, 끝나면 누적 67.75분)</h2>
+<h2 id="n51">51. s44 용량과 full (1분, 끝나면 누적 68.25분)</h2>
 <p><strong>[0]</strong> 디스크가 차면 어떻게 될까요?</p>
 <p><strong>[1]</strong> bucket의 용량 0은 무제한이 아니라 파일시스템의
-90%입니다. 그리고 용량은 client가 봅니다. master는 queue 길이와,
-client가 지금 내릴 수 있다고 보고한 것만 봅니다.</p>
+90%입니다. 용량은 client가 봅니다. master는 queue 길이와, client가 지금
+내릴 수 있다고 보고한 것만 봅니다.</p>
 <p><strong>[2]</strong> SSD backend의 eviction이 none이면, offset
 backend는 이것이 기본인데, 2 TB나 1000만 key에서 offload가 멈춥니다.
-다시 켜지는 것은 client가 다시 뜰 때뿐입니다. bucket 기본은 오래된
-bucket을 지우며 계속 씁니다.</p>
-<h2 id="n53">53. s45 재시작 뒤 (1분, 끝나면 누적 68.75분)</h2>
+다시 켜지는 것은 client가 다시 뜰 때뿐입니다. 디스크가 더 작아도 시작은
+되고, 차면 쓰기마다 실패합니다. bucket 기본은 오래된 bucket을 지우며
+씁니다.</p>
+<h2 id="n52">52. s45 재시작 뒤 (1분, 끝나면 누적 69.25분)</h2>
 <p><strong>[0]</strong> 다시 뜨면 어떻게 될까요?</p>
 <p><strong>[1]</strong> client가 다시 뜨면 bucket의 index를 읽어
 master에 다시 알립니다. offset backend의 기본값은 시작할 때
 비웁니다.</p>
 <p><strong>[2]</strong> master가 바뀌어도 SSD 사본은 돌아옵니다.
 master는 client의 SSD도 segment로 따로 둡니다. client가 그것이 없어진
-것을 보고 다시 올린 뒤 index를 다시 알립니다. Redis HA로 failover를 해
-보니 10초 뒤 SSD key가 모두 돌아왔습니다. 5막에서 본 DRAM key와
-다릅니다.</p>
-<h2 id="n54">54. m3 SSD (0.25분, 끝나면 누적 69분)</h2>
+것을 보고 다시 올린 뒤 index를 알립니다. Redis HA로 failover를 해 보니
+10초 뒤 SSD key가 모두 돌아왔습니다. 5막에서 본 DRAM key와 다릅니다.
+DRAM key를 알리지 않는 이유는 적혀 있지 않습니다.</p>
+<h2 id="n53">53. m3 SSD (0.25분, 끝나면 누적 69.5분)</h2>
 <p><strong>[0]</strong> SSD도 cache입니다. 기본은 쓸 때마다, page
 cache를 거쳐 내립니다. 이제 추론 엔진이 이것들을 어떻게 쓰는지
 봅니다.</p>
-<h2 id="n55">55. s46 PD 전송: vLLM (1.5분, 끝나면 누적 70.5분)</h2>
+<h2 id="n54">54. s46 PD 전송: vLLM (1.5분, 끝나면 누적 71분)</h2>
 <p><strong>[0]</strong> 엔진 쪽입니다. 먼저 PD 분리입니다. vLLM
 connector는 이 repo의 판, 곧 vLLM 0.12까지용으로 봅니다. 0.13부터는 vLLM
 안에 있습니다.</p>
@@ -657,20 +696,22 @@ KV 주소, 받을 block 번호를 알립니다.</p>
 씁니다. 다 쓰면 같은 ZMQ로 끝났다고 답하고, decode는 그 답을 받아
 진행합니다. vLLM 0.16부터는 router가 transfer_id를 만들지 않으면 KV가
 오지 않고 decode가 조용히 다시 계산한다고 Mooncake 문서가 적습니다.</p>
-<h2 id="n56">56. s47 vLLM Store connector (1.5분, 끝나면 누적 72분)</h2>
+<h2 id="n55">55. s47 vLLM Store connector (2분, 끝나면 누적 73분)</h2>
 <p><strong>[0]</strong> 다음은 pool로 쓸 때입니다. vLLM instance 둘이
 Store를 같이 씁니다.</p>
 <p><strong>[1]</strong> 한 instance가 넣은 KV block을 다른 instance가
-꺼내 씁니다. vLLM 0.21부터 vLLM 안에 있는
-MooncakeStoreConnector입니다.</p>
+꺼내 씁니다. vLLM 0.21부터 vLLM 안에 있는 MooncakeStoreConnector입니다.
+GPU의 KV 영역을 등록하고 batch_put_from과 batch_get_into 계열로 GPU와
+바로 주고받아, 복사가 없습니다.</p>
 <p><strong>[2]</strong> PD 분리와 같이 쓸 수도 있습니다.
 MultiConnector로 전송 connector와 pool connector를 묶습니다.</p>
 <p><strong>[3]</strong> key는 model 이름, rank, 그리고 vLLM의 block
-hash로 만듭니다. block hash는 그 block과 앞 block 전부의 token으로
-만듭니다. 그래서 같은 key면 값도 같고, put이 덮어쓰지 않아도 문제가
-적습니다. vLLM 0.28 이하이거나 xxhash를 쓰면 hash에 random seed가
-들어갑니다. 그때는 모든 엔진의 PYTHONHASHSEED를 맞춰야 합니다.</p>
-<h2 id="n57">57. s48 SGLang HiCache (2분, 끝나면 누적 74분)</h2>
+hash로 만듭니다. rank는 model을 나눠 맡은 GPU의 번호입니다. block hash는
+그 block과 앞 block 전부의 token으로 만듭니다. 그래서 같은 key면 값도
+같고, put이 덮어쓰지 않아도 문제가 적습니다. vLLM 0.28 이하이거나
+xxhash를 쓰면 hash에 random seed가 들어갑니다. 그때는 모든 엔진의
+PYTHONHASHSEED를 맞춰야 합니다.</p>
+<h2 id="n56">56. s48 SGLang HiCache (2분, 끝나면 누적 75분)</h2>
 <p><strong>[0]</strong> SGLang의 HiCache는 KV cache를 세 층에
 둡니다.</p>
 <p><strong>[1]</strong> GPU와 host memory는 instance 전용입니다. 맨 아래
@@ -678,57 +719,64 @@ hash로 만듭니다. block hash는 그 block과 앞 block 전부의 token으로
 <p><strong>[2]</strong> 단위는 page입니다. OS의 page가 아니라 SGLang이
 token 몇 개씩 묶은 KV입니다. 기본은 1 token이고 Mooncake 문서의 예시는
 64입니다. page 하나가 object 하나입니다. 그러려면 host memory의 layout이
-page 단위로 이어져 있어야 합니다. 그래야 복사 없이 object 하나로
-넘어갑니다. 그리고 host memory 전체를 RDMA에 등록하니, NIC가 등록할 수
-있는 크기를 봐야 합니다.</p>
+page 단위로 이어져 있어야 합니다. 그래야 host memory에서 Store로 복사
+없이 object 하나로 넘어갑니다. host memory는 통째로 한 번 등록하고, NIC
+한도보다 크면 TE가 나눠 등록합니다. 복사는 GPU와 host memory 사이에서만
+생기고 SGLang이 GPU에서 합니다. 넣을 때는 GPU 안에서 page 모양으로 다시
+놓고 host로 보내 두 번, 꺼낼 때는 host에서 GPU로 한 번입니다.</p>
 <p><strong>[3]</strong> 오가는 규칙도 있습니다. 셋째 층에서 맞은 길이가
 기본 256 token을 넘을 때만 미리 가져옵니다. 내려 쓸 때는 셋째 층에 없는
 page만 씁니다. batch는 128 page까지입니다.</p>
-<h2 id="n58">58. s49 LMCache와 나머지 (1분, 끝나면 누적 75분)</h2>
+<h2 id="n57">57. s49 LMCache와 나머지 (1분, 끝나면 누적 76분)</h2>
 <p><strong>[0]</strong> 나머지를 짧게 봅니다.</p>
 <p><strong>[1]</strong> LMCache도 Store를 remote backend로 씁니다.
-주소를 mooncakestore로 주고, LMCache가 KV를 끊는 단위인 chunk 하나를
-object로 둡니다. chunk는 기본 256 token입니다.</p>
+LMCache가 KV를 끊는 단위인 chunk 하나를 object로 둡니다. chunk는 기본
+256 token입니다. 복사는 기본 설정에서 넣을 때 셋(GPU 안, host, local
+buffer), 꺼낼 때 둘입니다.</p>
 <p><strong>[2]</strong> 오늘 다루지 않은 셋입니다. EP는 MoE model에서
-token을 그 expert가 있는 GPU로 보내고 다시 모으는 통신입니다. PG는
-PyTorch의 분산 통신 backend입니다. Conductor는 어느 instance에 어떤 KV가
-있는지 모읍니다.</p>
-<h2 id="n59">59. s52 쓰려면 지킬 것 다섯 (1.5분, 끝나면 누적
-76.5분)</h2>
+token을 그 expert의 GPU로 보내고 다시 모으는 통신입니다. PG는 PyTorch의
+분산 통신 backend입니다. Conductor는 KV 위치를 모읍니다.</p>
+<h2 id="n58">58. s52 쓰려면 지킬 것 다섯 (1.5분, 끝나면 누적
+77.5분)</h2>
 <p><strong>[0]</strong> 쓰실 때 지킬 것 다섯입니다.</p>
 <p><strong>[1]</strong> 첫째, put은 덮어쓰지 않습니다. 같은 key가 있으면
 성공을 돌려주고 아무것도 바꾸지 않습니다. 바꾸려면 upsert입니다.</p>
 <p><strong>[2]</strong> 둘째, put과 get은 local buffer를 거칩니다.
 object보다 커야 합니다. 큰 object라면 buffer를 미리 등록하고 복사 없는
-API를 씁니다.</p>
-<p><strong>[3]</strong> 셋째, HA를 켤 때는 OpLog나 snapshot도 같이
-켭니다. HA만으로는 새 master가 아무것도 모릅니다.</p>
+API를 씁니다. GPU로 받을 때는 batch_get_into입니다.</p>
+<p><strong>[3]</strong> 셋째, HA를 켤 때는 OpLog도 같이 켭니다.
+HA만으로는 새 master가 아무것도 모릅니다. snapshot 복원은 lease가 남은
+object만 되살립니다.</p>
 <p><strong>[4]</strong> 넷째, SSD offload도 cache입니다. 성능을 잴 때는
 io_uring 설정을 같이 적습니다.</p>
-<p><strong>[5]</strong> 다섯째, 설정을 분명히 합니다. TCP만 쓸 거면 환경
-변수로 강제합니다. vLLM 0.28 이하로 pool을 같이 쓰면 PYTHONHASHSEED를
-맞춥니다.</p>
-<h2 id="n60">60. s53 문서와 code가 다른 곳 (1.5분, 끝나면 누적
-78분)</h2>
+<p><strong>[5]</strong> 다섯째, 설정을 분명히 합니다. TCP만 쓸 거면
+MC_FORCE_TCP로 강제합니다. vLLM 0.28 이하로 pool을 같이 쓰면
+PYTHONHASHSEED를 맞춥니다.</p>
+<h2 id="n59">59. s53 문서와 code가 다른 곳 (1.5분, 끝나면 누적
+79분)</h2>
 <p><strong>[0]</strong> 문서와 code가 다른 곳 넷입니다. 여러 NIC와
-replica 상태는 앞에서 봤습니다. client 끊김은 문서가 10초라고 적지만,
-code는 10초에 SUSPECTED로 두고 약 30초에 지웁니다. HA backend는 설계
-문서가 etcd만 적지만 code는 redis와 k8s도 받습니다.</p>
-<p><strong>[1]</strong> 직접 돌려 확인한 것도 셋입니다. Python put이
-원소 수를 byte 수로 써서, float32 array는 4096 byte 중 1024 byte만
-저장하고 성공을 돌려줍니다. 기본 설정에서 bucket을 다 못 채운 key는
-SSD에 가지 않습니다. HA만 켠 failover 뒤 이전 key는 없고 그 자리는 새
-put이 받습니다. 앞의 둘은 upstream issue가 열려 있습니다.</p>
-<h2 id="n61">61. s54 정리 (0.5분, 끝나면 누적 78.5분)</h2>
+replica 상태는 앞에서 봤습니다. client 끊김은 문서가 10초, code는 10초에
+SUSPECTED, 약 30초에 지우기입니다. HA backend는 설계 문서가 etcd만,
+code는 redis와 k8s도 받습니다.</p>
+<p><strong>[1]</strong> 돌려 확인한 것은 다섯입니다. Python put과
+upsert는 numpy array를 받으면 원소 수를 byte 수로 써서, float32 array는
+4분의 1만 저장하고 성공을 돌려줍니다. bytes로 넘기면 됩니다. 엔진 연동은
+이 API를 쓰지 않습니다. 덜 찬 bucket의 key는 SSD에 가지 않습니다. HA만
+켠 failover 뒤 이전 key는 없습니다. 60초에 포기한 put의 늦은 data는 그
+자리의 새 key를 덮습니다. snapshot 복원은 lease가 남은 object만
+되살립니다. issue 번호는 화면에 있습니다.</p>
+<h2 id="n60">60. s54 정리 (0.5분, 끝나면 누적 79.5분)</h2>
 <p><strong>[0]</strong> 세 문장으로 정리합니다. master는 주소만,
 바이트는 RDMA로, 복사 횟수는 등록이 가릅니다. Store는 cache입니다. SSD는
 master가 시키고 소유 client가 읽습니다. 감사합니다.</p>
 <h1 id="appendix">부록</h1>
-<h2 id="n62">62. a00 부록: 질의응답 장면 색인 1</h2>
+<h2 id="n61">61. a00 부록: 질의응답 장면 색인 1</h2>
 <p><strong>[0]</strong> 질의응답용 색인입니다. 답은 예상 질문 카드에
 있습니다.</p>
-<h2 id="n63">63. a07 부록: 질의응답 장면 색인 2</h2>
+<h2 id="n62">62. a07 부록: 질의응답 장면 색인 2</h2>
 <p><strong>[0]</strong> 질의응답용 색인의 둘째 장입니다.</p>
+<h2 id="n63">63. a09 부록: 질의응답 장면 색인 3</h2>
+<p><strong>[0]</strong> 질의응답용 색인의 셋째 장입니다.</p>
 <h2 id="n64">64. a01 부록: master flag</h2>
 <p><strong>[0]</strong> master flag 표입니다.</p>
 <h2 id="n65">65. a02 부록: client 설정과 환경 변수</h2>
@@ -749,6 +797,12 @@ global segment, local buffer입니다. 그리고 protocol, device, master
 <p><strong>[2]</strong> 여러 노드에서는 둘을 봅니다. TE metadata를
 무엇으로 할지, 그리고 내 주소를 다른 노드가 닿는 주소로 주는
 것입니다.</p>
+<h2 id="n70">70. a08 부록: TENT</h2>
+<p><strong>[0]</strong> 다음 판 TE가 code 안에 있습니다. TENT입니다.</p>
+<p><strong>[1]</strong> slice마다 경로를 고르고 transport를 넘어
+failover합니다. 여러 NIC 문제를 푸는 방향입니다.</p>
+<p><strong>[2]</strong> 다만 기본 build에서 꺼져 있고 pip wheel에도
+없습니다.</p>
 <h1 id="faq">예상 질문 카드</h1>
 <p>답은 기술 문서(<code>../mooncake-tech-doc.md</code>),
 사실표(<code>reviews/facts-new.md</code>), 실행과 code 확인
@@ -756,45 +810,46 @@ global segment, local buffer입니다. 그리고 protocol, device, master
 가져왔다. 거기에 없는 것은 “확인하지 않았다”로 답한다. “보일 slide”는 이
 file에서는 storyboard의 id와 클릭이고, 인쇄
 대본(<code>script.md</code>)에서는 발표 화면의 slide 번호로 바뀐다.
-질의응답 장면 색인(부록 slide 62, slide 63)과 같은 순서다.</p>
+질의응답 장면 색인(부록 slide 61, slide 62, slide 63)과 같은 순서다.</p>
 <h2 id="q1">1. vLLM의 prefix cache, LMCache와 무엇이 다른가?</h2>
 <p>Mooncake Store는 여러 instance가 같이 쓰는 DRAM과 SSD의 pool입니다.
 SGLang 문서로 말하면 GPU와 host memory는 instance 전용이고, 그 아래 공유
 층이 Mooncake입니다. LMCache는 Mooncake Store를 remote backend로 쓸 수
 있습니다. vLLM 자체 prefix cache와의 성능 비교는 확인하지
 않았습니다.</p>
-<p>보일 slide: <a href="#n57">slide 57</a> (1), <a href="#n56">slide
-56</a> (1), <a href="#n58">slide 58</a> (1)</p>
+<p>보일 slide: <a href="#n56">slide 56</a> (1), <a href="#n55">slide
+55</a> (1), <a href="#n57">slide 57</a> (1)</p>
 <h2 id="q2">2. RDMA가 없으면 쓸 수 있나?</h2>
 <p>됩니다. HCA가 보이지 않으면 TCP transport를 설치합니다. HCA가 있는데
 TCP만 쓰려면 <code>MC_FORCE_TCP</code>로 강제합니다. TCP만 쓰는
 환경에서는 같은 프로세스의 replica를 memcpy로 읽고 씁니다. 이 세미나의
 실행 확인도 RDMA 장치 없이 TCP로 했습니다. TCP의 성능은 재지
 않았습니다.</p>
-<p>보일 slide: <a href="#n16">slide 16</a> (2), <a href="#n31">slide
-31</a> (2)</p>
+<p>보일 slide: <a href="#n16">slide 16</a> (2), <a href="#n30">slide
+30</a> (2)</p>
 <h2 id="q3">3. master 하나가 병목이나 단일 장애점이 아닌가?</h2>
 <p>master는 data를 나르지 않습니다. put 한 번에 RPC 둘, get 한 번에 RPC
 하나만 받습니다. 장애에는 HA로 leader를 다시 뽑습니다. 다만 HA만 켜면
-metadata가 넘어가지 않아서 OpLog나 snapshot을 같이 켜야 합니다. Redis
-HA로 돌려 보니 leader를 죽이고 9초 뒤 다시 쓸 수 있었고, 메모리의 key는
-사라졌고 SSD key는 10초 뒤 돌아왔습니다. master의 처리량 한계는 재지
-않았습니다.</p>
-<p>보일 slide: <a href="#n19">slide 19</a> (1), <a href="#n41">slide
-41</a> (2), <a href="#n42">slide 42</a> (1)</p>
+metadata가 넘어가지 않아서 OpLog를 같이 켭니다. snapshot 복원은 lease가
+남은 object만 되살립니다(카드 27). HA만 켠 Redis HA로 돌려 보니 leader를
+죽이고 9초 뒤 다시 쓸 수 있었고, 메모리의 key는 사라졌고 SSD key는 10초
+뒤 돌아왔습니다. OpLog를 같이 켜면 10초 뒤 메모리 key가 같은 주소와
+바이트로 돌아왔습니다. master의 처리량 한계는 재지 않았습니다.</p>
+<p>보일 slide: <a href="#n18">slide 18</a> (1), <a href="#n40">slide
+40</a> (2), <a href="#n41">slide 41</a> (1)</p>
 <h2 id="q4">4. replica를 늘리면 안전한가?</h2>
 <p>memory replica 수는 보장이 아닙니다. 자리가 하나뿐이면 하나만 두고
 성공합니다. client가 죽으면 그 노드의 replica는 지워지고, 다른 노드에
 replica가 남아 있으면 그것을 읽습니다. 그래서 Store는 cache로 쓰고,
 잃으면 다시 계산할 수 있는 것을 둡니다.</p>
-<p>보일 slide: <a href="#n22">slide 22</a> (3), <a href="#n40">slide
-40</a> (2)</p>
+<p>보일 slide: <a href="#n21">slide 21</a> (3), <a href="#n39">slide
+39</a> (2)</p>
 <h2 id="q5">5. 같은 key를 다시 쓰려면?</h2>
 <p>put은 같은 key가 있으면 아무것도 바꾸지 않고 성공을 돌려줍니다.
 바꾸려면 <code>upsert</code>를 씁니다. 다른 쪽이 그 key를 쓰는 중이면
 PutStart 뒤 30초까지는 put이 아무것도 쓰지 않고 0을 돌려줍니다. 30초가
 지나면 다음 put이 그 key를 가져갑니다.</p>
-<p>보일 slide: <a href="#n39">slide 39</a> (2)</p>
+<p>보일 slide: <a href="#n38">slide 38</a> (2)</p>
 <h2 id="q6">6. SSD 사본은 재시작 뒤에 남나?</h2>
 <p>backend에 따라 다릅니다. bucket과 file-per-key는 client가 다시 뜰 때
 file을 읽어 master에 다시 알립니다. offset backend는 기본(disabled)이면
@@ -803,26 +858,33 @@ file을 읽어 master에 다시 알립니다. offset backend는 기본(disabled)
 segment를 다시 올리고 index로 다시 알립니다. 실행해 보니 master 재시작
 9초, Redis HA failover 10초 뒤 SSD key 8개가 모두 돌아왔고 바이트도
 같았습니다.</p>
-<p>보일 slide: <a href="#n53">slide 53</a> (1), <a href="#n47">slide
-47</a> (3)</p>
+<p>보일 slide: <a href="#n52">slide 52</a> (1), <a href="#n46">slide
+46</a> (3)</p>
 <h2 id="q7">7. GPU 메모리를 바로 넣고 뺄 수 있나?</h2>
-<p>TE는 GPU memory를 등록할 수 있습니다. 기본은 nvidia-peermem을
-거칩니다. <code>get_into</code> 하나로 GPU에 받으면, 같은 프로세스
-memcpy가 아닌 한 TE 등록과 상관없이 local buffer로 받은 뒤 GPU로 한 번
-더 복사합니다. <code>batch_get_into</code>는 GPU buffer로 바로 읽어서
-복사가 한 번 적습니다. 왜 거치게 했는지는 code와 문서에 적혀 있지
-않습니다. <code>put_from</code>의 GPU 경로는 확인하지 않았습니다.</p>
-<p>보일 slide: <a href="#n9">slide 9</a> (2), <a href="#n31">slide
-31</a> (1)</p>
+<p>됩니다. GPU buffer를 <code>register_buffer</code>로 등록하면
+<code>put_from</code>, <code>batch_put_from</code>,
+<code>batch_get_into</code>는 NIC가 GPU 메모리를 바로 읽고 써서 복사가
+없습니다. 등록하지 않으면 TRANSFER_FAIL입니다. 예외는 단건
+<code>get_into</code>입니다. 목적지가 GPU면 local buffer로 받은 뒤, 부른
+thread가 <code>cudaMemcpy</code>로 GPU에 한 번 더 복사합니다. RDMA
+환경에서는 자기 segment의 replica도, hot cache가 켜졌으면 같은
+프로세스도 그렇습니다. local에서 CUDA 주소에 host memcpy를 하다 죽는
+것을 막으려고(#2926) 넣었고, remote에서 이미 등록된 GPU 목적지까지
+거치게 한 이유는 적혀 있지 않습니다. 기준판 뒤 #3431이 이것을
+바꿨습니다. GPU 등록은 기본으로 nvidia-peermem을 거치고, 그 module이
+없으면 등록이 실패합니다.</p>
+<p>보일 slide: <a href="#n9">slide 9</a> (2), <a href="#n30">slide
+30</a> (1)</p>
 <h2 id="q8">8. 여러 NIC를 실제로 다 쓰나?</h2>
-<p>code는 요청마다 local NIC 하나를 고르고, 한 호출 안에서 같은 메모리
-영역이 이어지면 그 NIC를 그대로 씁니다. Store는 object 하나를 16 MiB
-이하 요청으로 나눠 한 호출로 냅니다. 그래서 object 하나는 local NIC
-하나로 나가고, 여러 NIC는 여러 호출이 나눠 씁니다. NIC 둘을 두고 선택
-함수를 돌려 확인했습니다. 실제 NIC의 대역폭은 이 환경에 RDMA 장치가 없어
-재지 않았습니다. 다음 판인 TENT는 slice마다 NIC를 정합니다.</p>
-<p>보일 slide: <a href="#n15">slide 15</a> (2), <a href="#n17">slide
-17</a> (1)</p>
+<p>code는 요청마다 local NIC 하나를 고르고, 한 호출 안에서 같은 MR이
+이어지면 그 NIC를 그대로 씁니다. Store의 put은 object 하나를 16 MiB 이하
+요청으로 나눠 한 호출로 내고, get은 요청 하나입니다. 그래서 object
+하나는 local NIC 하나로 나가고, 여러 NIC는 여러 호출이 나눠 씁니다. NIC
+둘을 두고 선택 함수를 돌려 확인했습니다. 실제 NIC의 대역폭은 이 환경에
+RDMA 장치가 없어 재지 않았습니다. 다음 판인 TENT는 slice마다 NIC를
+정합니다.</p>
+<p>보일 slide: <a href="#n15">slide 15</a> (2), <a href="#n70">slide
+70</a> (1)</p>
 <h2 id="q9">9. 성능은 얼마나 나오나?</h2>
 <p>이 세미나는 성능을 재지 않았습니다. README에는 40 GB를 옮길 때 4x200
 Gbps RoCE에서 최대 87 GB/s, 8x400 Gbps에서 190 GB/s, TCP의 약 2.4배와
@@ -834,13 +896,13 @@ Qwen3-8B). 문서의 값이고 확인하지 않았습니다.</p>
 <p>build flag <code>USE_TENT</code>를 켜고 직접 build해야 합니다. pip
 wheel에는 들어 있지 않아서 <code>MC_USE_TENT</code>를 줘도 효과가
 없습니다. 언제 기본이 될지는 확인하지 않았습니다.</p>
-<p>보일 slide: <a href="#n17">slide 17</a> (2)</p>
+<p>보일 slide: <a href="#n70">slide 70</a> (2)</p>
 <h2 id="q11">11. EP와 PG는?</h2>
 <p>오늘 범위 밖입니다. EP는 MoE model에서 token을 그 expert가 있는 GPU로
 보내고(dispatch) 결과를 모으는(combine) 통신 runtime이고, 죽은 rank를
 건너뜁니다. PG는 <code>torch.distributed</code>의 ProcessGroup
 backend입니다. 설계 문서가 따로 있습니다.</p>
-<p>보일 slide: <a href="#n58">slide 58</a> (2)</p>
+<p>보일 slide: <a href="#n57">slide 57</a> (2)</p>
 <h2 id="q12">12. 기준 commit 이후에 바뀐 것은?</h2>
 <p>오늘 내용은 upstream <code>a9983dcd</code>(2026-10-13) 기준입니다. 그
 뒤의 upstream은 다시 대조하지 않았습니다.</p>
@@ -861,8 +923,8 @@ pin된 채로 있습니다. 엔진 buffer는 <code>unregister_buffer</code>로
 부르는 쪽이 풀어야 하고, free를 감지해 자동으로 푸는 code는 없습니다.
 <code>close()</code>는 local buffer만 풉니다. TE는
 <code>ibv_fork_init()</code>을 부르고 ODP는 쓰지 않습니다.</p>
-<p>보일 slide: <a href="#n7">slide 7</a> (1), <a href="#n25">slide
-25</a> (3), <a href="#n31">slide 31</a> (1)</p>
+<p>보일 slide: <a href="#n7">slide 7</a> (1), <a href="#n24">slide
+24</a> (3), <a href="#n30">slide 30</a> (1)</p>
 <h2 id="q15">15. 인증이나 암호화가 있나?</h2>
 <p>TE handshake에는 인증도 TLS도 없습니다. listener는 모든 주소에서
 받고, P2PHANDSHAKE면 rkey가 든 segment 설명을 이 socket으로
@@ -878,9 +940,10 @@ encryption”이라고 적혀 있습니다.</p>
 9번까지 다시 보내고 FAILED로 끝납니다. completion이 끝내 오지 않으면
 기본으로 끊는 장치가 없습니다. Python은 30초에 byte당 1 ns를 더한 제한을
 둡니다. Store client는 전송을 60초까지 기다리고
-<code>TRANSFER_FAIL</code>을 돌려줍니다.</p>
-<p>보일 slide: <a href="#n14">slide 14</a> (3), <a href="#n43">slide
-43</a> (1)</p>
+<code>TRANSFER_FAIL</code>을 돌려줍니다. 이때 전송은 취소되지
+않습니다(카드 25).</p>
+<p>보일 slide: <a href="#n14">slide 14</a> (3), <a href="#n42">slide
+42</a> (1)</p>
 <h2 id="q17">17. 상대가 죽으면 내 NIC도 꺼지나?</h2>
 <p>아닙니다. 내 NIC를 5초 끄는 카운터는 내 쪽 오류(LOC_* 계열)만 셉니다.
 QP가 깨질 때 쏟아지는 FLUSH_ERR와 상대 쪽 오류는 세지 않습니다. 상대 쪽
@@ -900,8 +963,8 @@ QP가 깨질 때 쏟아지는 FLUSH_ERR와 상대 쪽 오류는 세지 않습니
 보니 failover 뒤 첫 새 put이 이전 object의 주소를 그대로 받았습니다.
 그래서 그 사이 lease 안에 끝난 옛 읽기를 막을 것은 checksum뿐입니다. 이
 경합 자체를 만들어 보지는 않았습니다.</p>
-<p>보일 slide: <a href="#n41">slide 41</a> (3), <a href="#n35">slide
-35</a> (3)</p>
+<p>보일 slide: <a href="#n40">slide 40</a> (3), <a href="#n34">slide
+34</a> (3)</p>
 <h2 id="q20">20. SSD의 data가 깨지면 알 수 있나?</h2>
 <p>bucket backend는 data와 <code>.meta</code>에 checksum이 없습니다.
 다시 뜰 때 <code>.meta</code>를 읽지 못하거나 해석이 실패한 bucket은
@@ -910,8 +973,8 @@ header, key, value를 덮지만 검사는 recovery 때 한 번이고, 평소
 읽기에서는 하지 않습니다. Store 전체의
 checksum(<code>MOONCAKE_STORE_CHECKSUM</code>)은 기본으로 꺼져
 있습니다.</p>
-<p>보일 slide: <a href="#n46">slide 46</a> (2), <a href="#n47">slide
-47</a> (2)</p>
+<p>보일 slide: <a href="#n45">slide 45</a> (2), <a href="#n46">slide
+46</a> (2)</p>
 <h2 id="q21">21. 전송이 lease보다 오래 걸리면?</h2>
 <p>get이 실패합니다. 전송이 끝난 뒤 lease가 지났으면 바이트를 받았어도
 <code>LEASE_EXPIRED</code>입니다. lease를 2 ms로 줄인 master에서 48 MiB
@@ -919,31 +982,169 @@ get을 세 번 해 보니 모두 실패했습니다. 다시 해도 같은 길이
 결과입니다. lease는 master의 <code>--default_kv_lease_ttl</code>로
 늘립니다. <code>get_into_ranges</code>는 기다리는 동안 lease를
 갱신합니다.</p>
-<p>보일 slide: <a href="#n35">slide 35</a> (3), <a href="#n43">slide
-43</a> (1)</p>
+<p>보일 slide: <a href="#n34">slide 34</a> (3), <a href="#n42">slide
+42</a> (1)</p>
 <h2 id="q22">22. one-sided로 쓰면 받는 쪽은 끝난 것을 어떻게 아나?</h2>
 <p>받는 쪽 CPU는 몰라도 되게 짜여 있습니다. Store에서는 쓴 쪽이 PutEnd로
 master에 알리고, master는 COMPLETE가 된 replica만 get에 내줍니다. vLLM
 PD 전송(이 repo의 판)에서는 prefill이 다 쓰면 같은 ZMQ socket으로
 <code>TRANS_DONE</code>을 돌려주고, decode는 그 답을 받은 뒤 그 요청을
 끝난 것으로 처리합니다.</p>
-<p>보일 slide: <a href="#n29">slide 29</a> (4), <a href="#n55">slide
-55</a> (3)</p>
+<p>보일 slide: <a href="#n28">slide 28</a> (4), <a href="#n54">slide
+54</a> (3)</p>
 <h2 id="q23">23. DRAM의 key는 왜 다시 알리지 못하나? SSD는 되는데.</h2>
 <p>client가 들고 있는 것은 segment 목록(id, 이름, base, 크기 등)뿐이고
 key 목록은 없습니다. 다시 mount할 때도 이 목록만 보냅니다. SSD는
 bucket의 index(<code>.meta</code>)가 디스크에 있어서, 새 master에 그것을
-읽어 다시 알립니다.</p>
-<p>보일 slide: <a href="#n41">slide 41</a> (3), <a href="#n53">slide
-53</a> (2)</p>
+읽어 다시 알립니다. DRAM key를 다시 알리지 않는 이유는 적혀 있지
+않습니다. #1336에서 maintainer는 “the master has forgotten that this
+data exists”라고 현상만 적었고, 설계 RFC(#1150)는 master 쪽에 남기는
+길을 택했습니다.</p>
+<p>보일 slide: <a href="#n40">slide 40</a> (3), <a href="#n52">slide
+52</a> (2)</p>
 <h2 id="q24">24. Python setup을 기본값으로 띄우면?</h2>
 <p>dict로 setup하면 global segment와 local buffer가 둘 다 16 MiB입니다.
 위치 인자로 주는 형태는 두 크기가 필수입니다. local buffer보다 큰
-object는 put과 get이 <code>INVALID_PARAMS</code>로 실패합니다. 환경
-변수로 읽으면 약 3 GiB와 1 GiB, <code>mooncake_client</code> 데몬은 4
-GB와 0입니다.</p>
-<p>보일 slide: <a href="#n24">slide 24</a> (3), <a href="#n33">slide
-33</a> (2)</p>
+object는 put과 get이 <code>INVALID_PARAMS</code>로 실패합니다. 여러
+thread가 동시에 local buffer를 다 쓰면 기다리지 않고 바로 실패합니다.
+돌려 보니 64 MiB buffer에 24 MiB object를 thread 넷이 동시에 다룰 때,
+get 80번 중 40번이 빈 bytes, put 40번 중 19번이 -600이었습니다. 환경
+변수로 읽으면 3.125 GiB와 1 GiB, <code>mooncake_client</code> 데몬은 4
+GiB(“4 GB”)와 0입니다.</p>
+<p>보일 slide: <a href="#n23">slide 23</a> (3), <a href="#n32">slide
+32</a> (2)</p>
+<h2 id="q25">25. 60초에 포기한 전송은 어떻게 되나?</h2>
+<p>취소되지 않고 계속 갑니다. classic TE에는 취소 호출이 없고, Store는
+기다림만 끝냅니다. put이면 client가 PutRevoke를 보내고 master는 그
+자리를 곧바로 풉니다. 그 자리를 다음 put이 받은 뒤 늦은 data가 도착하면
+새 key를 덮습니다. TCP로 돌려 보니 받는 쪽 I/O thread를 멈춰 둔 사이
+put이 60.0초에 -800으로 끝났고, 같은 자리를 받은 48 MiB key가 thread를
+풀고 5초 뒤 모두 앞 put의 바이트로 바뀌었습니다. maintainer는 PR
+#2036에서 이것을 막으려고 60초로 길게 잡았다고 적었습니다. get 쪽의 같은
+문제는 issue #4757로 열려 있습니다. RDMA로는 돌리지 않았습니다. 이
+PutRevoke는 600초를 기다리지 않습니다. 600초는 30초 뒤 다른 put이 key를
+가져갈 때와 끝나지 않은 put에만 걸립니다. 두 경로를 다르게 둔 이유는
+적혀 있지 않습니다. 30초 뒤 다른 client가 key를 가져갔는데 처음 쓰던
+쪽이 PutEnd를 늦게 보내면 ILLEGAL_CLIENT로 실패합니다.</p>
+<p>보일 slide: <a href="#n32">slide 32</a> (1), <a href="#n38">slide
+38</a> (3)</p>
+<h2 id="q26">26. 옛 leader가 돌아오면 두 leader가 되나?</h2>
+<p>잠깐 겹칩니다. Redis HA에서 leader를 SIGSTOP으로 멈추자 9.8초 뒤
+standby가 받았습니다. SIGCONT로 풀자 옛 leader는 첫 갱신에서
+leadership을 잃은 것을 알고 0.01초 안에 RPC port를 닫았지만, 그 직전
+멈춘 동안 쌓인 PutStart 2개를 처리했습니다. put 하나는 두 leader에
+갈라져 PutEnd에서 -704로 실패했습니다. client RPC에는 view 번호가 없어서
+master 쪽에서 막지 않습니다. 옛 leader 주소로 직접 setup한 client는
+RPC_FAIL만 받고 옮겨 가지 않았고, <code>redis://</code>로 setup한
+client는 새 leader로 이어졌습니다. etcd로는 돌리지 않았습니다.</p>
+<p>보일 slide: <a href="#n40">slide 40</a> (1)</p>
+<h2 id="q27">27. snapshot으로 다시 띄우면 다 돌아오나?</h2>
+<p>아닙니다. 복원 끝에 lease가 지난 object를 지웁니다. 쓴 뒤 읽지 않은
+object는 lease가 쓴 시각이라 지워지고, 읽은 object도 그 10초가 지나면
+지워집니다. 돌려 보니 읽은 뒤 8초에 복원하면 읽은 key만 돌아왔고, 13초에
+복원하면 하나도 돌아오지 않았습니다. upstream issue #3761이 같은 것을
+보고했습니다. OpLog를 켠 Redis HA failover는 다릅니다. 돌려 보니
+standby가 OpLog를 따라가다 승격해, 10초 뒤 메모리 key가 같은 주소와
+바이트로 돌아왔습니다. HA 승격에서 snapshot을 쓰는 경로는 돌리지
+않았습니다.</p>
+<p>보일 slide: <a href="#n41">slide 41</a> (2)</p>
+<h2 id="q28">28. client가 잠깐 멈추면?</h2>
+<p>Ping이 10초 없으면 SUSPECTED이고, 그때부터 그 client에 있는 replica는
+메모리든 SSD든 읽지 않고 그 segment에 새 자리도 주지 않습니다. 다른
+client에 replica가 있으면 그것을 읽습니다. 그 client에만 있으면 get은
+-703, <code>is_exist</code>는 0입니다. 돌려 보니 15초 멈췄다 풀린
+client는 remount 없이 이어졌고 key도 그대로였습니다. 그 사이 다른
+client의 get은 15초 막혔다가 lease가 지나 -707이었습니다. 40초 멈추면
+30초에 지워져, 돌아온 뒤 빈 segment로 다시 붙고 이전 key는
+-704였습니다.</p>
+<p>보일 slide: <a href="#n39">slide 39</a> (1)</p>
+<h2 id="q29">29. 빈 자리가 조각나면?</h2>
+<p>빈 자리를 합하면 넉넉해도 연속 구간이 없으면 다른 segment를
+random으로 최대 100개 봅니다. 그래도 없으면 PutStart가
+-200(NO_AVAILABLE_HANDLE)으로 바로 실패하고, eviction을 깨웁니다. put을
+다시 하는 것은 부르는 쪽입니다. 64 MiB segment에 8 MiB 구멍 넷을 만들고
+16 MiB를 넣어 보니 7 ms에 -200, 곧 object 하나가 지워졌고 다시 넣으니
+들어갔습니다. compaction은 없습니다.</p>
+<p>보일 slide: <a href="#n20">slide 20</a> (2), <a href="#n38">slide
+38</a> (1)</p>
+<h2 id="q30">30. 보통 부하에서 SSD offload가 되나?</h2>
+<p>bucket backend 기본값에서는 일부만 갑니다. bucket은 500 key나 256
+MiB가 차야 닫히고, 덜 찬 bucket의 key는 끝내 쓰이지 않습니다. 64 KiB
+object를 꾸준히 넣어 보니 10초 주기마다 약 300 key면 25%, 700이면 72%,
+1500이면 94%가 SSD에 갔습니다. 4 MiB object를 주기마다 약 100개 넣으면
+64개에서 크기로 닫혀 74%였습니다. put을 멈추면 남은 key는 영영 가지
+않습니다. upstream issue #3006, #4740이 열려 있습니다.</p>
+<p>보일 slide: <a href="#n47">slide 47</a> (3)</p>
+<h2 id="q31">31. offload 설정을 섞으면?</h2>
+<p>master에만 offload를 켜면 put은 성공하지만 SSD에 쓰지 않고 log도 남지
+않습니다. client에만 켜면 setup이 -1300입니다.
+<code>--offload_on_evict</code>는 SSD 사본이 생길 때까지 메모리 사본을
+남기는데, bucket을 못 채우면 실패로 돌아와 메모리에만 남습니다. 돌려
+보니 940개 가운데 440개가 끝까지 메모리에만 있었습니다. OpLog와 같이
+켜면 eviction이 SSD 사본 없이 지웁니다(#2826부터, 이유는 적혀 있지
+않음). queue(기본 50000)가 차면 metric만 오르고 log는 없습니다.</p>
+<p>보일 slide: <a href="#n48">slide 48</a> (2), <a href="#n44">slide
+44</a> (1)</p>
+<h2 id="q32">32. 엔진마다 GPU의 KV가 몇 번 복사되나?</h2>
+<p>여기서 복사는 CPU나 GPU의 memcpy만 셉니다(RDMA는 세지 않음). code로
+셌습니다.</p>
+<table>
+<colgroup>
+<col style="width: 33%" />
+<col style="width: 33%" />
+<col style="width: 33%" />
+</colgroup>
+<thead>
+<tr class="header">
+<th>경로</th>
+<th>넣을 때</th>
+<th>꺼낼 때</th>
+</tr>
+</thead>
+<tbody>
+<tr class="odd">
+<td>vLLM Store connector (v0.32.0)</td>
+<td>0</td>
+<td>0</td>
+</tr>
+<tr class="even">
+<td>SGLang HiCache (v0.5.22, 기본 layout)</td>
+<td>2 (GPU 안 재배치, GPU에서 host로)</td>
+<td>1 (host에서 GPU로)</td>
+</tr>
+<tr class="odd">
+<td>LMCache (v0.5.6, 기본)</td>
+<td>3 (GPU 안, host로, local buffer로)</td>
+<td>2 (CPU 복사, host에서 GPU로)</td>
+</tr>
+<tr class="even">
+<td>vLLM PD 전송(TE만)</td>
+<td>GPU에서 GPU로 WRITE, 0</td>
+<td></td>
+</tr>
+</tbody>
+</table>
+<p>보일 slide: <a href="#n30">slide 30</a> (1), <a href="#n55">slide
+55</a> (1), <a href="#n56">slide 56</a> (2), <a href="#n57">slide 57</a>
+(1)</p>
+<h2 id="q33">33. 왜 slice가 64 KiB이고 QP와 worker가 둘인가?</h2>
+<p>적힌 이유가 없습니다. 셋 다 공개 때의 첫 commit부터 그 값이고 PR이
+없습니다. 논문은 16 KB slice를 적었고 문서는 나중에 code에 맞춰 64KB로
+고쳤습니다(#444). nvidia-peermem 기본, rdma_cm 대신 자체 handshake, 단건
+put의 replica를 차례로 쓰기, eviction을 개수로 하기, snapshot이 offset
+allocator만 받기도 이유가 적혀 있지 않습니다. 이유가 적힌 것은 60초,
+30초, 600초, 그리고 lease를 5초로 늘린 일뿐입니다.</p>
+<p>보일 slide: <a href="#n13">slide 13</a> (3), <a href="#n42">slide
+42</a> (2)</p>
+<h2 id="q34">34. WRITE의 completion은 바이트가 B의 메모리에 들어갔다는
+뜻인가?</h2>
+<p>code가 보여 주는 것은 순서입니다. TE는 slice의 completion이 모두
+성공이면 그 요청을 COMPLETED로 두고, Store client는 그것을 본 뒤에
+PutEnd를 보냅니다. master는 COMPLETE가 된 replica만 get에 내줍니다.
+completion이 B의 메모리 반영까지 보장하는지는 RDMA 규격의 일이고, 이
+세미나에서는 확인하지 않았습니다.</p>
+<p>보일 slide: <a href="#n7">slide 7</a> (3), <a href="#n28">slide
+28</a> (4)</p>
 </main>
 <script>
 // "I/O"처럼 낱말 사이의 /에서 줄이 갈리지 않게 word joiner를 넣는다(deck/setup/main.ts와 같은 규칙)
